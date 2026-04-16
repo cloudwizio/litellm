@@ -18,6 +18,10 @@ from litellm._logging import verbose_logger
 class LiteLLMDatabase:
     """Handle LiteLLM database queries for the Mavvrik integration."""
 
+    # Cached column names for LiteLLM_DailyUserSpend — populated on first query
+    # so we know which JOIN-table columns to skip (they already appear in dus.*).
+    _dus_columns: Optional[List[str]] = None
+
     def _ensure_prisma_client(self):
         from litellm.proxy.proxy_server import prisma_client
 
@@ -28,6 +32,70 @@ class LiteLLMDatabase:
             )
         return prisma_client
 
+    async def _get_dus_columns(self, client: Any) -> List[str]:
+        """Return column names of LiteLLM_DailyUserSpend (cached after first call)."""
+        if LiteLLMDatabase._dus_columns is None:
+            rows = await client.db.query_raw(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name   = 'LiteLLM_DailyUserSpend'
+                ORDER BY ordinal_position
+                """
+            )
+            LiteLLMDatabase._dus_columns = [r["column_name"] for r in rows]
+        return LiteLLMDatabase._dus_columns
+
+    async def _build_join_columns(self, client: Any) -> str:
+        """Build aliased SELECT fragments for all scalar JOIN-table columns.
+
+        Fetches column names from information_schema at runtime so any new
+        columns added to VerificationToken, TeamTable, or UserTable in future
+        LiteLLM versions are automatically included.
+
+        Each column is prefixed with the table alias (vt_, tt_, ut_) to avoid
+        ambiguity with LiteLLM_DailyUserSpend columns (which are selected via
+        dus.*). Columns whose names already exist in LiteLLM_DailyUserSpend
+        are skipped to avoid duplicate data. Non-CSV-serialisable types
+        (ARRAY, jsonb) are cast to text.
+        """
+        dus_cols = set(await self._get_dus_columns(client))
+
+        # (sql_alias, table_name, column_prefix)
+        join_tables = [
+            ("vt", "LiteLLM_VerificationToken", "vt_"),
+            ("tt", "LiteLLM_TeamTable", "tt_"),
+            ("ut", "LiteLLM_UserTable", "ut_"),
+        ]
+
+        fragments = []
+        for alias, table_name, prefix in join_tables:
+            rows = await client.db.query_raw(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = $1
+                ORDER BY ordinal_position
+                """,
+                table_name,
+            )
+            for row in rows:
+                col = row["column_name"]
+                dtype = row["data_type"]
+                col_alias = f"{prefix}{col}"
+
+                # Skip columns that duplicate LiteLLM_DailyUserSpend fields
+                if col in dus_cols:
+                    continue
+
+                # Cast non-scalar types to text for CSV compatibility
+                if dtype in ("ARRAY", "jsonb", "json", "USER-DEFINED"):
+                    fragments.append(f'        {alias}."{col}"::text  AS "{col_alias}"')
+                else:
+                    fragments.append(f'        {alias}."{col}"  AS "{col_alias}"')
+
+        return ",\n".join(fragments)
+
     async def get_usage_data(
         self,
         date_str: str,
@@ -36,6 +104,12 @@ class LiteLLMDatabase:
         """Retrieve spend rows for a single calendar date (YYYY-MM-DD).
 
         Filters by dus.date so each export covers exactly one complete day.
+
+        The SELECT is built dynamically:
+        - dus.* captures all LiteLLM_DailyUserSpend columns (future-proof).
+        - JOIN table columns are fetched from information_schema at runtime,
+          prefixed with vt_/tt_/ut_, and non-scalar types cast to text.
+          Columns already present in LiteLLM_DailyUserSpend are skipped.
         """
         client = self._ensure_prisma_client()
 
@@ -43,22 +117,12 @@ class LiteLLMDatabase:
         # requires a 4-table LEFT JOIN (DailyUserSpend → VerificationToken →
         # TeamTable → UserTable). Prisma's relational API cannot express a multi-hop
         # JOIN in a single query without N+1 round-trips.
-        #
-        # dus.* selects all columns from LiteLLM_DailyUserSpend so that any new
-        # columns added to that table in future LiteLLM versions are automatically
-        # included in the export without requiring a code change here.
-        # Only specific non-overlapping columns are selected from the JOIN tables to
-        # avoid ambiguity (spend, user_id, team_id, created_at etc. exist in multiple
-        # tables and cannot be selected via wildcards).
-        query = """
+        join_columns = await self._build_join_columns(client)
+
+        query = f"""
         SELECT
             dus.*,
-            vt.team_id,
-            vt.key_alias    AS api_key_alias,
-            vt.organization_id,
-            tt.team_alias,
-            ut.user_email,
-            ut.user_alias
+{join_columns}
         FROM "LiteLLM_DailyUserSpend" dus
         LEFT JOIN "LiteLLM_VerificationToken" vt  ON dus.api_key   = vt.token
         LEFT JOIN "LiteLLM_TeamTable"         tt  ON vt.team_id    = tt.team_id
