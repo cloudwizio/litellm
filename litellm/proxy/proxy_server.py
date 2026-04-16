@@ -6583,7 +6583,7 @@ class ProxyStartupEvent:
         if await is_mavvrik_setup():
             await register_background_job(scheduler=scheduler)
 
-        ########################################################
+                ########################################################
         # Prometheus Background Job
         ########################################################
         if litellm.prometheus_initialize_budget_metrics is True:
