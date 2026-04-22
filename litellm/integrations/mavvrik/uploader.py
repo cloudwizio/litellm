@@ -11,6 +11,10 @@ Upload flow:
 Steps 3 and 4 talk directly to GCS (no Mavvrik auth header).
 Step 2 is delegated to Client which owns all Mavvrik API calls.
 
+Transport layer (shared by all GCS steps):
+  _gcs_request() — single httpx call with retry + exponential backoff,
+                   mirrors Client._request() but for GCS (no auth header).
+
 GCS resumable upload protocol reference:
   https://cloud.google.com/storage/docs/resumable-uploads
 """
@@ -18,7 +22,7 @@ GCS resumable upload protocol reference:
 import asyncio
 import gzip
 import io
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
 
 import httpx
 
@@ -84,100 +88,82 @@ class Uploader:
         """POST to the GCS signed URL to open a resumable upload session.
 
         Returns the session URI from the Location response header.
-        Retries on 5xx; raises immediately on 4xx.
         """
-        headers = {
-            "Content-Type": "application/gzip",
-            "x-goog-resumable": "start",
-        }
         metadata = b'{"contentEncoding":"gzip","contentDisposition":"attachment"}'
-        last_exc: Exception = RuntimeError("unknown error")
-
-        async with httpx.AsyncClient() as http:
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    resp = await http.post(
-                        signed_url, headers=headers, content=metadata, timeout=30.0
-                    )
-                    if resp.status_code == 201:
-                        session_uri = resp.headers.get("Location")
-                        if not session_uri:
-                            raise RuntimeError(
-                                "GCS initiate upload response missing Location header"
-                            )
-                        return session_uri
-
-                    last_exc = RuntimeError(
-                        f"GCS initiate upload failed: {resp.status_code} {resp.text[:200]}"
-                    )
-                    if resp.status_code < 500:
-                        raise last_exc
-
-                except httpx.RequestError as exc:
-                    last_exc = exc
-
-                if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF_BASE * (2**attempt)
-                    verbose_proxy_logger.warning(
-                        "uploader: initiate attempt %d/%d failed, retrying in %.1fs: %s",
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        wait,
-                        last_exc,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise RuntimeError(
-            f"GCS initiate upload failed after {_MAX_RETRIES} attempts: {last_exc}"
+        resp = await self._gcs_request(
+            "POST",
+            signed_url,
+            headers={"Content-Type": "application/gzip", "x-goog-resumable": "start"},
+            content=metadata,
+            timeout=30.0,
+            label="initiate",
         )
+        if resp.status_code != 201:
+            raise RuntimeError(
+                f"GCS initiate upload failed: {resp.status_code} {resp.text[:200]}"
+            )
+        session_uri = resp.headers.get("Location")
+        if not session_uri:
+            raise RuntimeError("GCS initiate upload response missing Location header")
+        return session_uri
 
     async def _finalize_upload(self, session_uri: str, gzip_bytes: bytes) -> None:
-        """PUT gzip bytes to the GCS session URI to complete the upload.
-
-        Retries on 5xx; raises immediately on 4xx.
-        """
-        headers = {
-            "Content-Type": "application/gzip",
-            "Content-Encoding": "gzip",
-            "x-goog-resumable": "stop",
-        }
-        last_exc: Exception = RuntimeError("unknown error")
-
-        async with httpx.AsyncClient() as http:
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    resp = await http.put(
-                        session_uri, headers=headers, content=gzip_bytes, timeout=120.0
-                    )
-                    if resp.status_code in (200, 201):
-                        verbose_proxy_logger.debug(
-                            "uploader: finalize OK (%d)", resp.status_code
-                        )
-                        return
-
-                    last_exc = RuntimeError(
-                        f"GCS finalize upload failed: {resp.status_code} {resp.text[:200]}"
-                    )
-                    if resp.status_code < 500:
-                        raise last_exc
-
-                except httpx.RequestError as exc:
-                    last_exc = exc
-
-                if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF_BASE * (2**attempt)
-                    verbose_proxy_logger.warning(
-                        "uploader: finalize attempt %d/%d failed, retrying in %.1fs: %s",
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        wait,
-                        last_exc,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise RuntimeError(
-            f"GCS finalize upload failed after {_MAX_RETRIES} attempts: {last_exc}"
+        """PUT gzip bytes to the GCS session URI to complete the bulk upload."""
+        resp = await self._gcs_request(
+            "PUT",
+            session_uri,
+            headers={
+                "Content-Type": "application/gzip",
+                "Content-Encoding": "gzip",
+                "x-goog-resumable": "stop",
+            },
+            content=gzip_bytes,
+            timeout=120.0,
+            label="finalize",
         )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"GCS finalize upload failed: {resp.status_code} {resp.text[:200]}"
+            )
+        verbose_proxy_logger.debug("uploader: finalize OK (%d)", resp.status_code)
+
+    async def _put_chunk(
+        self,
+        session_uri: str,
+        chunk: bytes,
+        offset: int,
+        final: bool,
+    ) -> None:
+        """PUT one chunk to the GCS resumable session URI.
+
+        Intermediate chunks: Content-Range: bytes X-Y/*  → expect 308
+        Final chunk:         Content-Range: bytes X-Y/T  → expect 200/201
+        """
+        end = offset + len(chunk) - 1
+        total_str = str(offset + len(chunk)) if final else "*"
+        content_range = f"bytes {offset}-{end}/{total_str}"
+        expected = {200, 201} if final else {308}
+
+        resp = await self._gcs_request(
+            "PUT",
+            session_uri,
+            headers={
+                "Content-Type": "application/gzip",
+                "Content-Range": content_range,
+            },
+            content=chunk,
+            timeout=120.0,
+            label="chunk",
+        )
+        if resp.status_code not in expected:
+            raise RuntimeError(
+                f"GCS PUT chunk failed: {resp.status_code} "
+                f"(expected {expected}): {resp.text[:200]}"
+            )
+
+    # ------------------------------------------------------------------
+    # Streaming upload
+    # ------------------------------------------------------------------
 
     async def _stream_upload(
         self,
@@ -203,7 +189,6 @@ class Uploader:
                 continue
 
             if not has_data:
-                # Defer opening GCS session until first real data arrives
                 signed_url = await self._client.get_signed_url(date_str)
                 session_uri = await self._initiate_resumable_upload(signed_url)
                 has_data = True
@@ -234,47 +219,39 @@ class Uploader:
         )
         return total
 
-    async def _put_chunk(
-        self,
-        session_uri: str,
-        chunk: bytes,
-        offset: int,
-        final: bool,
-    ) -> None:
-        """PUT one chunk to the GCS resumable session URI.
+    # ------------------------------------------------------------------
+    # Transport layer — shared by all GCS steps
+    # ------------------------------------------------------------------
 
-        Intermediate chunks: Content-Range: bytes X-Y/*  → expect 308
-        Final chunk:         Content-Range: bytes X-Y/T  → expect 200/201
-        Retries on 5xx; raises immediately on 4xx.
+    async def _gcs_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+        content: Optional[bytes] = None,
+        timeout: float = 30.0,
+        label: str = "",
+    ) -> httpx.Response:
+        """Execute a GCS HTTP request with retry and exponential backoff.
+
+        Mirrors Client._request() but for GCS — no Mavvrik auth header.
+        Retries on 5xx and network errors; returns 4xx immediately (no retry).
         """
-        end = offset + len(chunk) - 1
-        total_str = str(offset + len(chunk)) if final else "*"
-        content_range = f"bytes {offset}-{end}/{total_str}"
-        expected_status = {200, 201} if final else {308}
         last_exc: Exception = RuntimeError("unknown error")
 
         async with httpx.AsyncClient() as http:
             for attempt in range(_MAX_RETRIES):
                 try:
-                    resp = await http.put(
-                        session_uri,
-                        headers={
-                            "Content-Type": "application/gzip",
-                            "Content-Range": content_range,
-                        },
-                        content=chunk,
-                        timeout=120.0,
-                    )
-
-                    if resp.status_code in expected_status:
-                        return
-
-                    last_exc = RuntimeError(
-                        f"GCS PUT chunk failed: {resp.status_code} "
-                        f"(expected {expected_status}): {resp.text[:200]}"
+                    resp = await http.request(
+                        method, url, headers=headers, content=content, timeout=timeout
                     )
                     if resp.status_code < 500:
-                        raise last_exc
+                        return resp
+
+                    last_exc = RuntimeError(
+                        f"GCS {label or method} {resp.status_code}: {resp.text[:200]}"
+                    )
 
                 except httpx.RequestError as exc:
                     last_exc = exc
@@ -282,7 +259,8 @@ class Uploader:
                 if attempt < _MAX_RETRIES - 1:
                     wait = _RETRY_BACKOFF_BASE * (2**attempt)
                     verbose_proxy_logger.warning(
-                        "uploader: chunk PUT attempt %d/%d failed, retrying in %.1fs: %s",
+                        "uploader: %s attempt %d/%d failed, retrying in %.1fs: %s",
+                        label or method,
                         attempt + 1,
                         _MAX_RETRIES,
                         wait,
@@ -291,7 +269,7 @@ class Uploader:
                     await asyncio.sleep(wait)
 
         raise RuntimeError(
-            f"GCS PUT chunk failed after {_MAX_RETRIES} attempts: {last_exc}"
+            f"GCS {label or method} failed after {_MAX_RETRIES} attempts: {last_exc}"
         )
 
     # ------------------------------------------------------------------

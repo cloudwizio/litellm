@@ -85,26 +85,15 @@ class TestInitiateResumableUpload:
         resp = _mock_http_response(
             201, headers={"Location": "https://gcs.example.com/session"}
         )
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.post = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
             session_uri = await u._initiate_resumable_upload("https://signed-url")
-
         assert session_uri == "https://gcs.example.com/session"
 
     @pytest.mark.asyncio
     async def test_raises_on_missing_location_header(self):
         u = _make_uploader()
         resp = _mock_http_response(201, headers={})
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.post = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
             with pytest.raises(RuntimeError, match="Location"):
                 await u._initiate_resumable_upload("https://signed-url")
 
@@ -112,12 +101,7 @@ class TestInitiateResumableUpload:
     async def test_raises_on_non_201(self):
         u = _make_uploader()
         resp = _mock_http_response(403, text="Forbidden")
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.post = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
             with pytest.raises(RuntimeError, match="initiate"):
                 await u._initiate_resumable_upload("https://signed-url")
 
@@ -129,15 +113,11 @@ class TestInitiateResumableUpload:
         )
         captured = []
 
-        async def fake_post(url, headers=None, **kwargs):
+        async def fake_gcs_request(method, url, *, headers=None, **kwargs):
             captured.append(headers)
             return resp
 
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.post = fake_post
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
             await u._initiate_resumable_upload("https://signed-url")
 
         assert captured[0]["Content-Type"] == "application/gzip"
@@ -145,36 +125,28 @@ class TestInitiateResumableUpload:
 
     @pytest.mark.asyncio
     async def test_retries_on_5xx_then_raises(self):
+        """Retry behaviour is tested in TestGcsRequest — just confirm 5xx propagates."""
         u = _make_uploader()
-        resp = _mock_http_response(503, text="unavailable")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("failed after 3 attempts"),
         ):
-            http = MagicMock()
-            http.post = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
                 await u._initiate_resumable_upload("https://signed-url")
-
-        assert http.post.call_count == 3
 
     @pytest.mark.asyncio
     async def test_retries_on_request_error_then_raises(self):
         u = _make_uploader()
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("failed after 3 attempts"),
         ):
-            http = MagicMock()
-            http.post = AsyncMock(side_effect=httpx.ConnectError("timeout"))
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
                 await u._initiate_resumable_upload("https://signed-url")
-
-        assert http.post.call_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -186,110 +158,88 @@ class TestFinalizeUpload:
     @pytest.mark.asyncio
     async def test_accepts_200(self):
         u = _make_uploader()
-        resp = _mock_http_response(200)
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            return_value=_mock_http_response(200),
+        ):
             await u._finalize_upload("https://session-uri", b"gzip-bytes")
 
     @pytest.mark.asyncio
     async def test_accepts_201(self):
         u = _make_uploader()
-        resp = _mock_http_response(201)
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            return_value=_mock_http_response(201),
+        ):
             await u._finalize_upload("https://session-uri", b"gzip-bytes")
 
     @pytest.mark.asyncio
     async def test_raises_on_error_status(self):
         u = _make_uploader()
-        resp = _mock_http_response(500, text="Server Error")
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            return_value=_mock_http_response(500, text="Server Error"),
+        ):
             with pytest.raises(RuntimeError, match="finalize"):
                 await u._finalize_upload("https://session-uri", b"gzip-bytes")
 
     @pytest.mark.asyncio
     async def test_raises_immediately_on_4xx(self):
-        """4xx from GCS is not retried — raises immediately."""
+        """4xx from GCS returns immediately from _gcs_request — raises in _finalize."""
         u = _make_uploader()
-        resp = _mock_http_response(403, text="Forbidden")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            return_value=_mock_http_response(403, text="Forbidden"),
+        ):
             with pytest.raises(RuntimeError, match="finalize"):
                 await u._finalize_upload("https://session-uri", b"gzip-bytes")
-
-        mock_sleep.assert_not_called()
-        assert http.put.call_count == 1
 
     @pytest.mark.asyncio
     async def test_sends_gzip_bytes_as_body(self):
         u = _make_uploader()
-        resp = _mock_http_response(200)
         captured = []
 
-        async def fake_put(url, content=None, **kwargs):
+        async def fake_gcs_request(method, url, *, content=None, **kwargs):
             captured.append(content)
-            return resp
+            return _mock_http_response(200)
 
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = fake_put
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
             await u._finalize_upload("https://session-uri", b"my-gzip-data")
 
         assert captured[0] == b"my-gzip-data"
 
     @pytest.mark.asyncio
     async def test_retries_on_5xx_then_raises(self):
+        """Retry behaviour owned by _gcs_request — confirm propagation."""
         u = _make_uploader()
-        resp = _mock_http_response(503, text="unavailable")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("failed after 3 attempts"),
         ):
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
                 await u._finalize_upload("https://session-uri", b"data")
-
-        assert http.put.call_count == 3
 
     @pytest.mark.asyncio
     async def test_retries_on_request_error_then_raises(self):
         u = _make_uploader()
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("failed after 3 attempts"),
         ):
-            http = MagicMock()
-            http.put = AsyncMock(side_effect=httpx.ConnectError("timeout"))
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
                 await u._finalize_upload("https://session-uri", b"data")
-
-        assert http.put.call_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -468,17 +418,11 @@ class TestStreamUpload:
         u = _make_uploader()
         captured = []
 
-        async def fake_put(url, headers=None, content=None, **kwargs):
+        async def fake_gcs_request(method, url, *, headers=None, **kwargs):
             captured.append(headers)
-            resp = MagicMock()
-            resp.status_code = 308
-            return resp
+            return _mock_http_response(308)
 
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = fake_put
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
             await u._put_chunk("https://session", b"x" * 100, offset=0, final=False)
 
         assert "Content-Range" in captured[0]
@@ -490,17 +434,11 @@ class TestStreamUpload:
         u = _make_uploader()
         captured = []
 
-        async def fake_put(url, headers=None, content=None, **kwargs):
+        async def fake_gcs_request(method, url, *, headers=None, **kwargs):
             captured.append(headers)
-            resp = MagicMock()
-            resp.status_code = 200
-            return resp
+            return _mock_http_response(200)
 
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.put = fake_put
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
             await u._put_chunk("https://session", b"x" * 100, offset=256, final=True)
 
         cr = captured[0]["Content-Range"]
@@ -515,37 +453,98 @@ class TestStreamUpload:
 class TestPutChunkRetry:
     @pytest.mark.asyncio
     async def test_put_chunk_retries_on_5xx_then_raises(self):
-        """_put_chunk retries on 5xx and raises after exhausting retries."""
+        """_put_chunk propagates retry failure from _gcs_request."""
         u = _make_uploader()
-        resp_5xx = _mock_http_response(503, text="unavailable")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("failed after 3 attempts"),
         ):
-            http = MagicMock()
-            http.put = AsyncMock(return_value=resp_5xx)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
                 await u._put_chunk("https://session", b"data", offset=0, final=False)
 
-        assert http.put.call_count == 3
-
     @pytest.mark.asyncio
     async def test_put_chunk_raises_immediately_on_4xx(self):
-        """_put_chunk does not retry on 4xx."""
+        """4xx returned by _gcs_request causes _put_chunk to raise."""
         u = _make_uploader()
-        resp_4xx = _mock_http_response(403, text="Forbidden")
+        with patch.object(
+            u,
+            "_gcs_request",
+            new_callable=AsyncMock,
+            return_value=_mock_http_response(403, text="Forbidden"),
+        ):
+            with pytest.raises(RuntimeError):
+                await u._put_chunk("https://session", b"data", offset=0, final=False)
+
+
+# ---------------------------------------------------------------------------
+# _gcs_request — shared GCS transport (mirrors Client._request for GCS)
+# ---------------------------------------------------------------------------
+
+
+class TestGcsRequest:
+    @pytest.mark.asyncio
+    async def test_returns_response_on_success(self):
+        u = _make_uploader()
+        mock_resp = _mock_http_response(201)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            http = MagicMock()
+            http.request = AsyncMock(return_value=mock_resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            resp = await u._gcs_request("POST", "https://gcs.example.com", timeout=30.0)
+
+        assert resp.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_returns_4xx_without_retry(self):
+        u = _make_uploader()
+        mock_resp = _mock_http_response(403, text="Forbidden")
 
         with patch("httpx.AsyncClient") as mock_cls, patch(
             "asyncio.sleep", new_callable=AsyncMock
         ) as mock_sleep:
             http = MagicMock()
-            http.put = AsyncMock(return_value=resp_4xx)
+            http.request = AsyncMock(return_value=mock_resp)
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            with pytest.raises(RuntimeError):
-                await u._put_chunk("https://session", b"data", offset=0, final=False)
+            resp = await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
 
-        assert http.put.call_count == 1
+        assert resp.status_code == 403
+        assert http.request.call_count == 1
         mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retries_on_5xx_then_raises(self):
+        u = _make_uploader()
+        mock_resp = _mock_http_response(503, text="unavailable")
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            http = MagicMock()
+            http.request = AsyncMock(return_value=mock_resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="failed after"):
+                await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
+
+        assert http.request.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_retries_on_network_error_then_raises(self):
+        u = _make_uploader()
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            http = MagicMock()
+            http.request = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="failed after"):
+                await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
+
+        assert http.request.call_count == 3
