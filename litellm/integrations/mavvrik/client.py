@@ -112,15 +112,12 @@ class Client:
                 self.agent_url,
                 headers=self._auth_headers,
                 json={"error": error_message[:500]},
+                label="report_error",
             )
-            if resp.status_code in (200, 204):
-                verbose_proxy_logger.debug(
-                    "report_error: reported for connection %s", self._connection_id
-                )
-            else:
-                verbose_proxy_logger.warning(
-                    "report_error: unexpected status %d", resp.status_code
-                )
+            self._assert_ok(resp, expected={200, 204})
+            verbose_proxy_logger.debug(
+                "report_error: reported for connection %s", self._connection_id
+            )
         except Exception as exc:
             verbose_proxy_logger.warning("report_error failed (non-fatal): %s", exc)
 
