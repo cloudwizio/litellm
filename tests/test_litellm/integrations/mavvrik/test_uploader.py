@@ -393,3 +393,115 @@ class TestUpload:
             await u.upload("col\nval", date_str="2025-03-10")
 
         assert captured_dates[0] == "2025-03-10"
+
+
+# ---------------------------------------------------------------------------
+# Uploader._stream_upload — chunked streaming GCS upload
+# ---------------------------------------------------------------------------
+
+
+class TestStreamUpload:
+    @pytest.mark.asyncio
+    async def test_stream_upload_sends_chunks_and_returns_count(self):
+        """_stream_upload() sends 256KB chunks and returns total row count."""
+        u = _make_uploader()
+
+        # signed URL + session URI from client
+        with patch.object(
+            u.client,
+            "get_signed_url",
+            new_callable=AsyncMock,
+            return_value="https://signed",
+        ), patch.object(
+            u,
+            "_initiate_resumable_upload",
+            new_callable=AsyncMock,
+            return_value="https://session",
+        ):
+
+            put_calls = []
+
+            async def fake_put(session_uri, chunk, offset, final):
+                put_calls.append({"size": len(chunk), "final": final, "offset": offset})
+
+            with patch.object(u, "_put_chunk", side_effect=fake_put):
+                # Feed 3 pages of CSV text — enough to trigger at least one 256KB chunk
+                async def pages():
+                    yield "date,model,spend\n"  # header
+                    yield "2026-01-01,gpt-4o,0.01\n" * 5000  # page 1
+                    yield "2026-01-01,gpt-4o,0.01\n" * 5000  # page 2
+
+                count = await u._stream_upload(pages(), date_str="2026-01-01")
+
+        assert count > 0
+        assert len(put_calls) >= 1
+        # final chunk must be marked final=True
+        assert put_calls[-1]["final"] is True
+        # all intermediate chunks must be False
+        for call in put_calls[:-1]:
+            assert call["final"] is False
+
+    @pytest.mark.asyncio
+    async def test_stream_upload_empty_pages_skips_upload(self):
+        """_stream_upload() with empty generator skips all GCS steps."""
+        u = _make_uploader()
+
+        with patch.object(
+            u.client, "get_signed_url", new_callable=AsyncMock
+        ) as mock_url, patch.object(
+            u, "_initiate_resumable_upload", new_callable=AsyncMock
+        ) as mock_init:
+
+            async def empty_pages():
+                return
+                yield  # make it a generator
+
+            count = await u._stream_upload(empty_pages(), date_str="2026-01-01")
+
+        assert count == 0
+        mock_url.assert_not_called()
+        mock_init.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_chunk_intermediate_sends_308_content_range(self):
+        """_put_chunk() sends Content-Range with * total for intermediate chunks."""
+        u = _make_uploader()
+        captured = []
+
+        async def fake_put(url, headers=None, content=None, **kwargs):
+            captured.append(headers)
+            resp = MagicMock()
+            resp.status_code = 308
+            return resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            http = MagicMock()
+            http.put = fake_put
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await u._put_chunk("https://session", b"x" * 100, offset=0, final=False)
+
+        assert "Content-Range" in captured[0]
+        assert captured[0]["Content-Range"].endswith("/*")
+
+    @pytest.mark.asyncio
+    async def test_put_chunk_final_sends_total_in_content_range(self):
+        """_put_chunk() declares total size in Content-Range for final chunk."""
+        u = _make_uploader()
+        captured = []
+
+        async def fake_put(url, headers=None, content=None, **kwargs):
+            captured.append(headers)
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            http = MagicMock()
+            http.put = fake_put
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await u._put_chunk("https://session", b"x" * 100, offset=256, final=True)
+
+        cr = captured[0]["Content-Range"]
+        assert cr == "bytes 256-355/356"

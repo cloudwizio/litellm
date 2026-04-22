@@ -138,7 +138,7 @@ class Client:
 
         Raises RuntimeError if the call fails or the response is missing the URL.
         """
-        params = {"name": date_str, "type": "metrics"}
+        params = {"name": date_str, "type": "metrics", "datetime": date_str}
         resp = await self._request(
             "GET", self.upload_url, headers=self._auth_headers, params=params
         )

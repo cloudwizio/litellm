@@ -16,7 +16,7 @@ Internal methods:
 """
 
 import io
-from typing import Any, List, Optional, Tuple
+from typing import Any, AsyncIterator, List, Optional, Tuple
 
 import polars as pl
 
@@ -48,6 +48,15 @@ ORDER BY dus.date, dus.user_id, dus.model ASC
 """
 
 _EARLIEST_DATE_QUERY = 'SELECT MIN(date) AS earliest FROM "LiteLLM_DailyUserSpend"'
+
+# Fallback header used when DB is empty — derived from the known query columns.
+_USAGE_HEADER = (
+    "date,user_id,api_key,model,model_group,custom_llm_provider,"
+    "prompt_tokens,completion_tokens,spend,api_requests,successful_requests,"
+    "failed_requests,cache_creation_input_tokens,cache_read_input_tokens,"
+    "created_at,updated_at,id,team_id,api_key_alias,organization_id,"
+    "team_alias,user_email,user_alias\n"
+)
 
 
 class Exporter:
@@ -94,6 +103,60 @@ class Exporter:
         df = self.filter(df)
         csv = self._to_csv(df, connection_id=connection_id)
         return df, csv
+
+    async def _stream_pages(
+        self,
+        date_str: str,
+        connection_id: Optional[str] = None,
+        page_size: int = 10_000,
+    ) -> AsyncIterator[str]:
+        """Yield CSV text in pages — header first, then one page of rows at a time.
+
+        Uses LIMIT/OFFSET pagination so only page_size rows are in memory at once.
+        Stops when a page returns fewer rows than page_size (last page reached).
+        Called exclusively by Uploader._stream_upload() via Orchestrator._export().
+        """
+        # Build a one-row DataFrame just to get the header columns from the schema.
+        # We yield the header once then write subsequent pages without it.
+        header_written = False
+        offset = 0
+
+        while True:
+            client = self._prisma_client
+            rows = await client.db.query_raw(
+                _USAGE_QUERY + " LIMIT $2 OFFSET $3",
+                date_str,
+                page_size,
+                offset,
+            )
+
+            if not rows:
+                if not header_written:
+                    # Empty table — yield header only so caller knows columns
+                    yield _USAGE_HEADER
+                break
+
+            df = pl.DataFrame(rows, infer_schema_length=None)
+            df = self.filter(df)
+
+            if not header_written:
+                # First non-empty page — derive header from actual columns
+                if connection_id:
+                    df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
+                buf = io.StringIO()
+                df.write_csv(buf)
+                yield buf.getvalue()
+                header_written = True
+            else:
+                if connection_id:
+                    df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
+                buf = io.StringIO()
+                df.write_csv(buf, include_header=False)
+                yield buf.getvalue()
+
+            offset += page_size
+            if len(rows) < page_size:
+                break  # last page — fewer rows than requested
 
     async def get_earliest_date(self) -> Optional[str]:
         """Return the earliest date string (YYYY-MM-DD) in LiteLLM_DailyUserSpend, or None."""

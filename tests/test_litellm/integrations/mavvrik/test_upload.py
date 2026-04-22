@@ -413,6 +413,7 @@ class TestClientGetSignedUrl:
 
         assert captured[0]["name"] == "2025-01-15"
         assert captured[0]["type"] == "metrics"
+        assert captured[0]["datetime"] == "2025-01-15"
 
     @pytest.mark.asyncio
     async def test_sends_auth_header(self):

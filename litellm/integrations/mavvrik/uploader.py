@@ -18,7 +18,7 @@ GCS resumable upload protocol reference:
 import asyncio
 import gzip
 import io
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
@@ -31,6 +31,10 @@ else:
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds; doubles each retry
+
+# GCS requires intermediate chunks to be exactly this size (256 KB aligned).
+# Only the final chunk can be smaller.
+_GCS_CHUNK_SIZE = 256 * 1024
 
 
 class Uploader:
@@ -174,6 +178,95 @@ class Uploader:
         raise RuntimeError(
             f"GCS finalize upload failed after {_MAX_RETRIES} attempts: {last_exc}"
         )
+
+    async def _stream_upload(
+        self,
+        pages: AsyncIterator[str],
+        date_str: str,
+    ) -> int:
+        """Stream CSV pages to GCS using chunked resumable upload.
+
+        Each intermediate chunk is exactly _GCS_CHUNK_SIZE bytes (256 KB aligned).
+        The final chunk can be any size. Called exclusively by Orchestrator._export().
+
+        Returns total compressed bytes uploaded (0 if pages is empty).
+        """
+        gz_buffer = bytearray()
+        raw_buf = io.BytesIO()
+        gz = gzip.GzipFile(fileobj=raw_buf, mode="wb")
+        offset = 0
+        session_uri: str = ""
+        has_data = False
+
+        async for csv_chunk in pages:
+            if not csv_chunk:
+                continue
+
+            if not has_data:
+                # Defer opening GCS session until first real data arrives
+                signed_url = await self._client.get_signed_url(date_str)
+                session_uri = await self._initiate_resumable_upload(signed_url)
+                has_data = True
+
+            gz.write(csv_chunk.encode("utf-8"))
+            gz.flush()
+            gz_buffer.extend(raw_buf.getvalue())
+            raw_buf.seek(0)
+            raw_buf.truncate(0)
+
+            while len(gz_buffer) >= _GCS_CHUNK_SIZE:
+                chunk = bytes(gz_buffer[:_GCS_CHUNK_SIZE])
+                gz_buffer = gz_buffer[_GCS_CHUNK_SIZE:]
+                await self._put_chunk(session_uri, chunk, offset=offset, final=False)
+                offset += len(chunk)
+
+        if not has_data:
+            verbose_proxy_logger.debug("uploader: no data to stream, skipping upload")
+            return 0
+
+        gz.close()
+        gz_buffer.extend(raw_buf.getvalue())
+        total = offset + len(gz_buffer)
+        await self._put_chunk(session_uri, bytes(gz_buffer), offset=offset, final=True)
+
+        verbose_proxy_logger.info(
+            "uploader: stream upload complete — %d bytes for date %s", total, date_str
+        )
+        return total
+
+    async def _put_chunk(
+        self,
+        session_uri: str,
+        chunk: bytes,
+        offset: int,
+        final: bool,
+    ) -> None:
+        """PUT one chunk to the GCS resumable session URI.
+
+        Intermediate chunks: Content-Range: bytes X-Y/*  → expect 308
+        Final chunk:         Content-Range: bytes X-Y/T  → expect 200/201
+        """
+        end = offset + len(chunk) - 1
+        total_str = str(offset + len(chunk)) if final else "*"
+        content_range = f"bytes {offset}-{end}/{total_str}"
+        expected_status = {200, 201} if final else {308}
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.put(
+                session_uri,
+                headers={
+                    "Content-Type": "application/gzip",
+                    "Content-Range": content_range,
+                },
+                content=chunk,
+                timeout=120.0,
+            )
+
+        if resp.status_code not in expected_status:
+            raise RuntimeError(
+                f"GCS PUT chunk failed: {resp.status_code} "
+                f"(expected {expected_status}): {resp.text[:200]}"
+            )
 
     # ------------------------------------------------------------------
     # Helpers

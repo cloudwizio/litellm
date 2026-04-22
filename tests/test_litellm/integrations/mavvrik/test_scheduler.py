@@ -85,29 +85,24 @@ class TestResolveFirstRunStartDate:
 class TestRunExportLoop:
     @pytest.mark.asyncio
     async def test_uploads_all_dates_since_marker(self):
-        """Uploads each day from marker to yesterday (inclusive)."""
+        """Exports each day from marker to yesterday (inclusive)."""
         orc = _make_orchestrator()
-        uploaded_dates = []
+        exported_dates = []
 
-        async def fake_upload(csv_payload, date_str):
-            uploaded_dates.append(date_str)
+        async def fake_export(export_date):
+            exported_dates.append(export_date.isoformat())
+            return 1024
 
         orc._client.register = AsyncMock(return_value="2026-04-09")
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
-        orc._exporter = MagicMock()
-        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
-        with patch.object(
-            orc._uploader, "upload", side_effect=fake_upload
-        ), patch.object(
+        with patch.object(orc, "_export", side_effect=fake_export), patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 11)
-        ), patch.object(
-            Orchestrator, "_get_pod_lock_manager", return_value=None
-        ):
+        ), patch.object(Orchestrator, "_get_pod_lock_manager", return_value=None):
             await orc.run()
 
-        assert uploaded_dates == ["2026-04-09", "2026-04-10"]
+        assert exported_dates == ["2026-04-09", "2026-04-10"]
         assert orc._client.advance_marker.call_count == 2
 
     @pytest.mark.asyncio
@@ -118,11 +113,9 @@ class TestRunExportLoop:
         orc._client.register = AsyncMock(return_value="2026-04-09")
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
-        orc._exporter = MagicMock()
-        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
         with patch.object(
-            orc._uploader, "upload", new_callable=AsyncMock
+            orc, "_export", new_callable=AsyncMock, return_value=512
         ), patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
         ), patch.object(
@@ -135,70 +128,68 @@ class TestRunExportLoop:
 
     @pytest.mark.asyncio
     async def test_does_nothing_when_marker_up_to_date(self):
-        """No uploads when marker is already at today."""
+        """No exports when marker is already at today."""
         orc = _make_orchestrator()
 
         orc._client.register = AsyncMock(return_value="2026-04-11")  # = today
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
 
-        with patch.object(orc._uploader, "upload") as mock_upload, patch.object(
+        with patch.object(
+            orc, "_export", new_callable=AsyncMock
+        ) as mock_export, patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 11)
-        ), patch.object(Orchestrator, "_get_pod_lock_manager", return_value=None):
+        ), patch.object(
+            Orchestrator, "_get_pod_lock_manager", return_value=None
+        ):
             await orc.run()
 
-        mock_upload.assert_not_called()
+        mock_export.assert_not_called()
         orc._client.advance_marker.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_first_run_uses_earliest_db_date(self):
         """First run: register() returns None → start from MIN(date) in DB."""
         orc = _make_orchestrator()
-        uploaded_dates = []
+        exported_dates = []
 
-        async def fake_upload(csv_payload, date_str):
-            uploaded_dates.append(date_str)
+        async def fake_export(export_date):
+            exported_dates.append(export_date.isoformat())
+            return 1024
 
         orc._client.register = AsyncMock(return_value=None)
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
         orc._exporter.get_earliest_date = AsyncMock(return_value="2026-04-09")
-        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
-        with patch.object(
-            orc._uploader, "upload", side_effect=fake_upload
-        ), patch.object(
+        with patch.object(orc, "_export", side_effect=fake_export), patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 11)
-        ), patch.object(
-            Orchestrator, "_get_pod_lock_manager", return_value=None
-        ):
+        ), patch.object(Orchestrator, "_get_pod_lock_manager", return_value=None):
             await orc.run()
 
-        assert uploaded_dates == ["2026-04-09", "2026-04-10"]
+        assert exported_dates == ["2026-04-09", "2026-04-10"]
 
     @pytest.mark.asyncio
     async def test_skips_upload_when_no_data(self):
-        """When exporter returns empty CSV, upload is not called."""
+        """When export returns 0 bytes, advance still called (date was processed)."""
         orc = _make_orchestrator()
 
         orc._client.register = AsyncMock(return_value="2026-04-09")
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
-        orc._exporter = MagicMock()
-        orc._exporter.export = AsyncMock(return_value=(pl.DataFrame(), ""))
 
         with patch.object(
-            orc._uploader, "upload", new_callable=AsyncMock
-        ) as mock_upload, patch.object(
+            orc, "_export", new_callable=AsyncMock, return_value=0
+        ), patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
         ), patch.object(
             Orchestrator, "_get_pod_lock_manager", return_value=None
         ):
             await orc.run()
 
-        # upload() is still called — it handles empty payload internally
-        assert mock_upload.call_count == 1
+        # advance_marker always called — even for empty dates
+        orc._client.advance_marker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_reports_error_on_pipeline_failure(self):
@@ -330,53 +321,49 @@ class TestResolveFirstRunInvalidDate:
         assert result == date(2026, 4, 15)
 
 
-class TestOverflowDetection:
+class TestStreamingExport:
     @pytest.mark.asyncio
-    async def test_raises_when_rows_exceed_limit(self):
-        """fetch returns limit+1 rows → RuntimeError, marker does not advance."""
-        from litellm.constants import MAVVRIK_MAX_FETCHED_DATA_RECORDS
-
+    async def test_export_calls_stream_pages_and_stream_upload(self):
+        """_export() wires exporter._stream_pages() into uploader._stream_upload()."""
         orc = _make_orchestrator()
-        orc._client.register = AsyncMock(return_value="2026-04-09")
-        orc._client.advance_marker = AsyncMock()
-        orc._client.report_error = AsyncMock()
-        orc._exporter = MagicMock()
-        # Return one row more than the limit to trigger overflow
-        overflow_df = _make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS + 1)
-        orc._exporter.export = AsyncMock(return_value=(overflow_df, "csv"))
 
-        with patch.object(
-            Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
-        ), patch.object(Orchestrator, "_get_pod_lock_manager", return_value=None):
-            await orc.run()
+        async def fake_stream_pages(**kwargs):
+            yield "date,model\n"
+            yield "2026-04-09,gpt-4o\n"
 
-        # marker must NOT advance — day is not fully exported
-        orc._client.advance_marker.assert_not_called()
-        # error must be reported to Mavvrik
-        orc._client.report_error.assert_called_once()
-        assert "more than" in orc._client.report_error.call_args.args[0]
+        orc._exporter._stream_pages = fake_stream_pages
+
+        stream_upload_called_with = []
+
+        async def fake_stream_upload(pages, date_str):
+            stream_upload_called_with.append(date_str)
+            # consume the generator
+            async for _ in pages:
+                pass
+            return 1024
+
+        orc._uploader._stream_upload = fake_stream_upload
+
+        result = await orc._export(date(2026, 4, 9))
+
+        assert result == 1024
+        assert stream_upload_called_with == ["2026-04-09"]
 
     @pytest.mark.asyncio
-    async def test_proceeds_normally_at_exact_limit(self):
-        """fetch returns exactly limit rows → no overflow, upload proceeds."""
-        from litellm.constants import MAVVRIK_MAX_FETCHED_DATA_RECORDS
-
+    async def test_export_returns_zero_when_no_data(self):
+        """_export() returns 0 when _stream_upload returns 0 (no data)."""
         orc = _make_orchestrator()
-        orc._client.register = AsyncMock(return_value="2026-04-09")
-        orc._client.advance_marker = AsyncMock()
-        orc._client.report_error = AsyncMock()
-        orc._exporter = MagicMock()
-        exact_df = _make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS)
-        orc._exporter.export = AsyncMock(return_value=(exact_df, "col\nval"))
 
-        with patch.object(
-            orc._uploader, "upload", new_callable=AsyncMock
-        ), patch.object(
-            Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
-        ), patch.object(
-            Orchestrator, "_get_pod_lock_manager", return_value=None
-        ):
-            await orc.run()
+        async def empty_pages(**kwargs):
+            return
+            yield
 
-        orc._client.advance_marker.assert_called_once()
-        orc._client.report_error.assert_not_called()
+        orc._exporter._stream_pages = empty_pages
+
+        async def fake_stream_upload(pages, date_str):
+            return 0
+
+        orc._uploader._stream_upload = fake_stream_upload
+
+        result = await orc._export(date(2026, 4, 9))
+        assert result == 0

@@ -382,3 +382,135 @@ class TestExporterExport:
 
         assert len(df) == 1
         assert "0.02" in csv
+
+
+# ---------------------------------------------------------------------------
+# Exporter._stream_pages — async generator for paginated DB fetch
+# ---------------------------------------------------------------------------
+
+
+class TestStreamPages:
+    @pytest.mark.asyncio
+    async def test_yields_header_then_csv_rows(self):
+        """_stream_pages() first yields a CSV header, then row data."""
+        exporter = Exporter()
+        mock_rows = [
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.01,
+                "successful_requests": 1,
+            },
+        ]
+        # page 1 returns 1 row, page 2 returns empty → stop
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(side_effect=[mock_rows, []])
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            chunks = []
+            async for chunk in exporter._stream_pages(
+                "2026-04-10", connection_id="c-1"
+            ):
+                chunks.append(chunk)
+
+        assert len(chunks) >= 1
+        combined = "".join(chunks)
+        assert "date" in combined and "model" in combined
+        assert "gpt-4o" in combined
+
+    @pytest.mark.asyncio
+    async def test_yields_nothing_when_db_empty(self):
+        """_stream_pages() yields only header when DB returns no rows."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=[])
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            chunks = []
+            async for chunk in exporter._stream_pages(
+                "2026-04-10", connection_id="c-1"
+            ):
+                chunks.append(chunk)
+
+        # only header, no data rows
+        assert len(chunks) == 1
+        assert "date" in chunks[0]
+
+    @pytest.mark.asyncio
+    async def test_filters_zero_successful_requests(self):
+        """_stream_pages() drops rows with successful_requests == 0."""
+        exporter = Exporter()
+        mock_rows = [
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.01,
+                "successful_requests": 0,
+            },
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.02,
+                "successful_requests": 3,
+            },
+        ]
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(side_effect=[mock_rows, []])
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            chunks = []
+            async for chunk in exporter._stream_pages("2026-04-10", connection_id="c"):
+                chunks.append(chunk)
+
+        combined = "".join(chunks)
+        assert "0.02" in combined
+        assert "0.01" not in combined
+
+    @pytest.mark.asyncio
+    async def test_paginates_using_offset(self):
+        """_stream_pages() uses OFFSET to fetch subsequent pages."""
+        exporter = Exporter()
+        page1 = [
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.01,
+                "successful_requests": 1,
+            }
+        ] * 3
+        page2 = []
+        mock_client = MagicMock()
+        captured_queries = []
+
+        async def fake_query_raw(query, *params):
+            captured_queries.append(params)
+            return page1 if len(captured_queries) == 1 else page2
+
+        mock_client.db.query_raw = fake_query_raw
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            async for _ in exporter._stream_pages(
+                "2026-04-10", connection_id="c", page_size=3
+            ):
+                pass
+
+        # Two queries: page 1 (offset 0) and page 2 (offset 3 → empty → stop)
+        assert len(captured_queries) == 2
+        assert captured_queries[0][-1] == 0  # first OFFSET is 0
+        assert captured_queries[1][-1] == 3  # second OFFSET is page_size

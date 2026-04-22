@@ -18,15 +18,10 @@ Marker semantics:
 """
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterator, Tuple
-
-import polars as pl
+from typing import Iterator
 
 from litellm._logging import verbose_logger
-from litellm.constants import (
-    MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME,
-    MAVVRIK_MAX_FETCHED_DATA_RECORDS,
-)
+from litellm.constants import MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME
 from litellm.integrations.mavvrik.client import Client
 from litellm.integrations.mavvrik.exporter import Exporter
 from litellm.integrations.mavvrik.uploader import Uploader
@@ -108,8 +103,7 @@ class Orchestrator:
             verbose_logger.warning("Orchestrator: exporting %s → %s", start, end)
 
             for export_date in self._date_range(start, end):
-                df, csv = await self._export(export_date)
-                await self._upload(csv, export_date, record_count=len(df))
+                await self._export(export_date)
                 await self._advance(export_date)
 
             verbose_logger.warning("Orchestrator: export complete, last date=%s", end)
@@ -133,31 +127,27 @@ class Orchestrator:
 
         return await self._resolve_first_run_start_date()
 
-    async def _export(self, export_date: date) -> Tuple[pl.DataFrame, str]:
-        """Fetch, filter, and serialize spend data — overflow detection included."""
-        df, csv = await self._exporter.export(
-            date_str=export_date.isoformat(),
-            connection_id=self._client.connection_id,
-            limit=MAVVRIK_MAX_FETCHED_DATA_RECORDS + 1,
-        )
-        if len(df) > MAVVRIK_MAX_FETCHED_DATA_RECORDS:
-            raise RuntimeError(
-                f"Date {export_date.isoformat()} has more than "
-                f"{MAVVRIK_MAX_FETCHED_DATA_RECORDS} rows. "
-                f"Increase MAVVRIK_MAX_FETCHED_DATA_RECORDS or implement "
-                f"chunked streaming upload."
-            )
-        return df, csv
+    async def _export(self, export_date: date) -> int:
+        """Stream spend data from DB to GCS for one date.
 
-    async def _upload(self, csv: str, export_date: date, record_count: int) -> None:
+        Uses Exporter._stream_pages() → Uploader._stream_upload() so only
+        one page of rows is in memory at a time. No row limit or overflow check.
+
+        Returns total compressed bytes uploaded (0 when no data for the date).
+        """
         date_str = export_date.isoformat()
-        await self._uploader.upload(csv, date_str=date_str)
-        if record_count > 0:
+        pages = self._exporter._stream_pages(
+            date_str=date_str,
+            connection_id=self._client.connection_id,
+        )
+        total_bytes = await self._uploader._stream_upload(pages, date_str=date_str)
+        if total_bytes > 0:
             verbose_logger.warning(
-                "Orchestrator: %s → uploaded %d records ✓", date_str, record_count
+                "Orchestrator: %s → streamed %d bytes to GCS ✓", date_str, total_bytes
             )
         else:
             verbose_logger.warning("Orchestrator: %s → no data, skipped", date_str)
+        return total_bytes
 
     async def _advance(self, export_date: date) -> None:
         next_date = export_date + timedelta(days=1)
