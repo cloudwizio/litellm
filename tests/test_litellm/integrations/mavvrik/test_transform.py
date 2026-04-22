@@ -68,19 +68,19 @@ class TestExporterFilter:
 class TestExporterToCsv:
     def test_empty_dataframe_returns_empty_string(self):
         transformer = Exporter()
-        result = transformer.to_csv(pl.DataFrame())
+        result = transformer._to_csv(pl.DataFrame())
         assert result == ""
 
     def test_nonzero_successful_requests_in_output(self):
         transformer = Exporter()
         df = _make_df(successful_requests=[3])
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         assert result != ""
 
     def test_output_has_header_row(self):
         transformer = Exporter()
         df = _make_df()
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         header = result.split("\n")[0]
         assert "model" in header
         assert "spend" in header
@@ -88,7 +88,7 @@ class TestExporterToCsv:
     def test_all_db_columns_present_in_header(self):
         transformer = Exporter()
         df = _make_df()
-        header = transformer.to_csv(df).split("\n")[0]
+        header = transformer._to_csv(df).split("\n")[0]
         for col in [
             "date",
             "user_id",
@@ -112,20 +112,20 @@ class TestExporterToCsv:
     def test_spend_value_in_output(self):
         transformer = Exporter()
         df = _make_df(spend=[42.5])
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         assert "42.5" in result
 
     def test_model_value_in_output(self):
         transformer = Exporter()
         df = _make_df(model=["claude-3-5-sonnet"])
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         assert "claude-3-5-sonnet" in result
 
     def test_no_successful_requests_column_no_filter_applied(self):
         """If column is absent, all rows are included (no filter)."""
         transformer = Exporter()
         df = pl.DataFrame({"date": ["2025-01-19"], "spend": [5.0], "model": ["gpt-4"]})
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         lines = [l for l in result.strip().split("\n") if l]
         assert len(lines) == 2  # header + 1 data row
 
@@ -139,14 +139,14 @@ class TestExporterToCsv:
                 "model": ["gpt-4", "claude-3"],
             }
         )
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         lines = [l for l in result.strip().split("\n") if l]
         assert len(lines) == 3  # header + 2 data rows
 
     def test_output_is_valid_csv(self):
         transformer = Exporter()
         df = _make_df()
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         # Polars can re-read its own CSV output
         reloaded = pl.read_csv(io.StringIO(result))
         assert len(reloaded) == 1
@@ -155,7 +155,7 @@ class TestExporterToCsv:
     def test_return_type_is_str(self):
         transformer = Exporter()
         df = _make_df()
-        result = transformer.to_csv(df)
+        result = transformer._to_csv(df)
         assert isinstance(result, str)
 
 
@@ -168,14 +168,14 @@ class TestToCsvConnectionId:
     def test_adds_connection_id_column_when_provided(self):
         exporter = Exporter()
         df = _make_df()
-        result = exporter.to_csv(df, connection_id="conn-123")
+        result = exporter._to_csv(df, connection_id="conn-123")
         assert "connection_id" in result
         assert "conn-123" in result
 
     def test_no_connection_id_column_when_omitted(self):
         exporter = Exporter()
         df = _make_df()
-        result = exporter.to_csv(df)
+        result = exporter._to_csv(df)
         assert "connection_id" not in result.split("\n")[0]
 
 
@@ -232,7 +232,7 @@ class TestExporterDbMethods:
             "_prisma_client",
             new_callable=lambda: property(lambda self: mock_client),
         ):
-            df = await exporter.get_usage_data("2026-04-10")
+            df = await exporter._get_usage_data("2026-04-10")
 
         assert len(df) == 1
         assert "model" in df.columns
@@ -256,7 +256,7 @@ class TestExporterDbMethods:
             "_prisma_client",
             new_callable=lambda: property(lambda self: mock_client),
         ):
-            await exporter.get_usage_data("2026-04-10", limit=100)
+            await exporter._get_usage_data("2026-04-10", limit=100)
 
         assert "LIMIT" in captured[0][0]
         assert 100 in captured[0][1]
@@ -294,3 +294,91 @@ class TestExporterDbMethods:
             result = await exporter.get_earliest_date()
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Exporter.export() — public method combining _get_usage_data + filter + _to_csv
+# ---------------------------------------------------------------------------
+
+
+class TestExporterExport:
+    @pytest.mark.asyncio
+    async def test_export_returns_dataframe_and_csv(self):
+        """export() returns (filtered_df, csv_str) in one call."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_rows = [
+            {
+                "date": "2026-04-10",
+                "user_id": "user-1",
+                "model": "gpt-4o",
+                "spend": 0.015,
+                "successful_requests": 5,
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+            }
+        ]
+        mock_client.db.query_raw = AsyncMock(return_value=mock_rows)
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            df, csv = await exporter.export(
+                date_str="2026-04-10", connection_id="conn-1"
+            )
+
+        assert len(df) == 1
+        assert "conn-1" in csv
+        assert isinstance(csv, str)
+
+    @pytest.mark.asyncio
+    async def test_export_returns_empty_when_no_data(self):
+        """export() returns empty DataFrame and empty string when no rows."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=[])
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            df, csv = await exporter.export(
+                date_str="2026-04-10", connection_id="conn-1"
+            )
+
+        assert df.is_empty()
+        assert csv == ""
+
+    @pytest.mark.asyncio
+    async def test_export_filters_zero_successful_requests(self):
+        """export() excludes rows with successful_requests == 0."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_rows = [
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.01,
+                "successful_requests": 0,
+            },
+            {
+                "date": "2026-04-10",
+                "model": "gpt-4o",
+                "spend": 0.02,
+                "successful_requests": 3,
+            },
+        ]
+        mock_client.db.query_raw = AsyncMock(return_value=mock_rows)
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            df, csv = await exporter.export(date_str="2026-04-10", connection_id="c")
+
+        assert len(df) == 1
+        assert "0.02" in csv

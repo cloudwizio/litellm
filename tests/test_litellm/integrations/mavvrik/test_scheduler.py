@@ -96,9 +96,7 @@ class TestRunExportLoop:
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
-        orc._exporter.get_usage_data = AsyncMock(return_value=_make_df())
-        orc._exporter.filter = MagicMock(side_effect=lambda df: df)
-        orc._exporter.to_csv = MagicMock(return_value="col\nval")
+        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
         with patch.object(
             orc._uploader, "upload", side_effect=fake_upload
@@ -121,9 +119,7 @@ class TestRunExportLoop:
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
-        orc._exporter.get_usage_data = AsyncMock(return_value=_make_df())
-        orc._exporter.filter = MagicMock(side_effect=lambda df: df)
-        orc._exporter.to_csv = MagicMock(return_value="col\nval")
+        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
         with patch.object(
             orc._uploader, "upload", new_callable=AsyncMock
@@ -168,9 +164,7 @@ class TestRunExportLoop:
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
         orc._exporter.get_earliest_date = AsyncMock(return_value="2026-04-09")
-        orc._exporter.get_usage_data = AsyncMock(return_value=_make_df())
-        orc._exporter.filter = MagicMock(side_effect=lambda df: df)
-        orc._exporter.to_csv = MagicMock(return_value="col\nval")
+        orc._exporter.export = AsyncMock(return_value=(_make_df(), "col\nval"))
 
         with patch.object(
             orc._uploader, "upload", side_effect=fake_upload
@@ -192,9 +186,7 @@ class TestRunExportLoop:
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
-        orc._exporter.get_usage_data = AsyncMock(return_value=pl.DataFrame())
-        orc._exporter.filter = MagicMock(side_effect=lambda df: df)
-        orc._exporter.to_csv = MagicMock(return_value="")
+        orc._exporter.export = AsyncMock(return_value=(pl.DataFrame(), ""))
 
         with patch.object(
             orc._uploader, "upload", new_callable=AsyncMock
@@ -239,11 +231,28 @@ class TestOrchestratorHelpers:
         assert isinstance(epoch, int)
         assert epoch > 0
 
-    def test_date_range_yields_inclusive(self):
+    def test_export_end_date_is_yesterday(self):
         orc = _make_orchestrator()
         with patch.object(Orchestrator, "_utc_today", return_value=date(2026, 4, 12)):
-            dates = list(orc._date_range(date(2026, 4, 10)))
+            end = orc._export_end_date()
+        assert end == date(2026, 4, 11)
+
+    def test_date_range_takes_explicit_end(self):
+        orc = _make_orchestrator()
+        end = date(2026, 4, 11)
+        dates = list(orc._date_range(date(2026, 4, 10), end))
         assert dates == [date(2026, 4, 10), date(2026, 4, 11)]
+
+    def test_date_range_single_date_when_start_equals_end(self):
+        orc = _make_orchestrator()
+        dates = list(orc._date_range(date(2026, 4, 10), date(2026, 4, 10)))
+        assert dates == [date(2026, 4, 10)]
+
+    def test_pipeline_skips_when_start_equals_end_plus_one(self):
+        """start > end means nothing to export — no dates yielded."""
+        orc = _make_orchestrator()
+        dates = list(orc._date_range(date(2026, 4, 12), date(2026, 4, 11)))
+        assert dates == []
 
     def test_get_pod_lock_manager_returns_none_when_proxy_logging_none(self):
         with patch(
@@ -333,9 +342,8 @@ class TestOverflowDetection:
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
         # Return one row more than the limit to trigger overflow
-        orc._exporter.get_usage_data = AsyncMock(
-            return_value=_make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS + 1)
-        )
+        overflow_df = _make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS + 1)
+        orc._exporter.export = AsyncMock(return_value=(overflow_df, "csv"))
 
         with patch.object(
             Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
@@ -358,11 +366,8 @@ class TestOverflowDetection:
         orc._client.advance_marker = AsyncMock()
         orc._client.report_error = AsyncMock()
         orc._exporter = MagicMock()
-        orc._exporter.get_usage_data = AsyncMock(
-            return_value=_make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS)
-        )
-        orc._exporter.filter = MagicMock(side_effect=lambda df: df)
-        orc._exporter.to_csv = MagicMock(return_value="col\nval")
+        exact_df = _make_df(rows=MAVVRIK_MAX_FETCHED_DATA_RECORDS)
+        orc._exporter.export = AsyncMock(return_value=(exact_df, "col\nval"))
 
         with patch.object(
             orc._uploader, "upload", new_callable=AsyncMock

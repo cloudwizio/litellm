@@ -1,13 +1,13 @@
-"""Orchestrator — pipeline sequencing: register → fetch → transform → upload → advance.
+"""Orchestrator — pipeline sequencing: register → export → upload → advance.
 
 Responsibility: sequence the export steps and own the pod lock. Nothing else.
 
-Each step is one method, one line in _run_pipeline:
-  _register()  → start_date
-  _fetch()     → DataFrame
-  _transform() → CSV string
-  _upload()    → None
-  _advance()   → None
+Pipeline in _run_pipeline (one line per step):
+  start, end = await self._register(), self._export_end_date()
+  for export_date in self._date_range(start, end):
+      df, csv = await self._export(export_date)
+      await self._upload(csv, export_date)
+      await self._advance(export_date)
 
 One try/except in _run_pipeline. No nested exception handling anywhere else.
 
@@ -18,7 +18,7 @@ Marker semantics:
 """
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterator
+from typing import Iterator, Tuple
 
 import polars as pl
 
@@ -48,13 +48,14 @@ class Orchestrator:
     def _utc_today() -> date:
         return datetime.now(timezone.utc).date()
 
-    @property
-    def _yesterday(self) -> date:
+    def _export_end_date(self) -> date:
+        """Last date eligible for export (yesterday UTC — today's data is incomplete)."""
         return self._utc_today() - timedelta(days=1)
 
-    def _date_range(self, start: date) -> Iterator[date]:
+    def _date_range(self, start: date, end: date) -> Iterator[date]:
+        """Yield each date from start to end (inclusive)."""
         current = start
-        while current <= self._yesterday:
+        while current <= end:
             yield current
             current += timedelta(days=1)
 
@@ -93,29 +94,25 @@ class Orchestrator:
 
     async def _run_pipeline(self) -> None:
         try:
-            start_date = await self._register()
+            start = await self._register()
+            end = self._export_end_date()
 
-            if start_date > self._yesterday:
+            if start > end:
                 verbose_logger.warning(
-                    "Orchestrator: up to date (start=%s, yesterday=%s), nothing to export",
-                    start_date,
-                    self._yesterday,
+                    "Orchestrator: up to date (start=%s, end=%s), nothing to export",
+                    start,
+                    end,
                 )
                 return
 
-            verbose_logger.warning(
-                "Orchestrator: exporting %s → %s", start_date, self._yesterday
-            )
+            verbose_logger.warning("Orchestrator: exporting %s → %s", start, end)
 
-            for export_date in self._date_range(start_date):
-                df = await self._fetch(export_date)
-                csv = self._transform(df, export_date)
-                await self._upload(csv, export_date)
+            for export_date in self._date_range(start, end):
+                df, csv = await self._export(export_date)
+                await self._upload(csv, export_date, record_count=len(df))
                 await self._advance(export_date)
 
-            verbose_logger.warning(
-                "Orchestrator: export complete, last date=%s", self._yesterday
-            )
+            verbose_logger.warning("Orchestrator: export complete, last date=%s", end)
 
         except Exception as exc:
             verbose_logger.error(
@@ -136,10 +133,11 @@ class Orchestrator:
 
         return await self._resolve_first_run_start_date()
 
-    async def _fetch(self, export_date: date) -> pl.DataFrame:
-        # Fetch one extra row to detect overflow without a separate COUNT query.
-        df = await self._exporter.get_usage_data(
+    async def _export(self, export_date: date) -> Tuple[pl.DataFrame, str]:
+        """Fetch, filter, and serialize spend data — overflow detection included."""
+        df, csv = await self._exporter.export(
             date_str=export_date.isoformat(),
+            connection_id=self._client.connection_id,
             limit=MAVVRIK_MAX_FETCHED_DATA_RECORDS + 1,
         )
         if len(df) > MAVVRIK_MAX_FETCHED_DATA_RECORDS:
@@ -149,16 +147,17 @@ class Orchestrator:
                 f"Increase MAVVRIK_MAX_FETCHED_DATA_RECORDS or implement "
                 f"chunked streaming upload."
             )
-        return df
+        return df, csv
 
-    def _transform(self, df: pl.DataFrame, export_date: date) -> str:
-        filtered = self._exporter.filter(df)
-        return self._exporter.to_csv(filtered, connection_id=self._client.connection_id)
-
-    async def _upload(self, csv: str, export_date: date) -> None:
+    async def _upload(self, csv: str, export_date: date, record_count: int) -> None:
         date_str = export_date.isoformat()
         await self._uploader.upload(csv, date_str=date_str)
-        verbose_logger.warning("Orchestrator: %s → upload done", date_str)
+        if record_count > 0:
+            verbose_logger.warning(
+                "Orchestrator: %s → uploaded %d records ✓", date_str, record_count
+            )
+        else:
+            verbose_logger.warning("Orchestrator: %s → no data, skipped", date_str)
 
     async def _advance(self, export_date: date) -> None:
         next_date = export_date + timedelta(days=1)
@@ -180,7 +179,7 @@ class Orchestrator:
                 return earliest
             except ValueError:
                 pass
-        return self._yesterday
+        return self._export_end_date()
 
     # ------------------------------------------------------------------
     # Infrastructure

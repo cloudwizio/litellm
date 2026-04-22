@@ -281,8 +281,11 @@ class Service:
         uploader = Uploader(client=client)
         exporter = Exporter()
 
-        df = await exporter.get_usage_data(date_str=date_str, limit=effective_limit)
-        df = exporter.filter(df)
+        df, csv_payload = await exporter.export(
+            date_str=date_str,
+            connection_id=client.connection_id,
+            limit=effective_limit,
+        )
 
         if df.is_empty():
             return {
@@ -292,7 +295,6 @@ class Service:
             }
 
         records_exported = len(df)
-        csv_payload = exporter.to_csv(df, connection_id=client.connection_id)
         await uploader.upload(csv_payload, date_str=date_str)
 
         return {
@@ -329,7 +331,11 @@ class Service:
         client = _build_client(data)
         exporter = Exporter()
 
-        df = await exporter.get_usage_data(date_str=date_str, limit=effective_limit)
+        df, csv_payload = await exporter.export(
+            date_str=date_str,
+            connection_id=client.connection_id,
+            limit=effective_limit,
+        )
 
         if df.is_empty():
             return {
@@ -344,9 +350,6 @@ class Service:
                     "unique_teams": 0,
                 },
             }
-
-        df = exporter.filter(df)
-        csv_payload = exporter.to_csv(df, connection_id=client.connection_id)
 
         total_cost = float(df["spend"].sum()) if "spend" in df.columns else 0.0
         total_tokens = (

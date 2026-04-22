@@ -47,11 +47,10 @@ def _make_df(rows=3):
 
 
 def _mock_exporter(df):
-    """Return a mock Exporter instance with stubbed methods."""
+    """Return a mock Exporter instance with stubbed export() method."""
     exporter = MagicMock()
-    exporter.get_usage_data = AsyncMock(return_value=df)
-    exporter.filter = MagicMock(side_effect=lambda df: df)
-    exporter.to_csv = MagicMock(return_value="col\nval\n")
+    csv = "" if df.is_empty() else "col\nval\n"
+    exporter.export = AsyncMock(return_value=(df, csv))
     return exporter
 
 

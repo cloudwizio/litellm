@@ -1,18 +1,22 @@
 """Exporter — fetch spend data from Postgres and transform to CSV.
 
-Handles the "export" side of the pipeline: extracting data from LiteLLM's
-database and converting it into a CSV string ready for upload.
+Responsibility: extract data from LiteLLM's database and convert it to CSV.
 
-SQL queries:
-  get_usage_data()   — 4-table LEFT JOIN on LiteLLM_DailyUserSpend
-  get_earliest_date() — MIN(date) for first-run start date resolution
+Public interface:
+  export(date_str, connection_id, limit) → (DataFrame, csv_str)
+      Single entry point: fetch → filter → serialize. Used by Orchestrator.
 
-Transform:
-  to_csv()  — filter rows, add connection_id, serialise to CSV string
+  get_earliest_date() → Optional[str]
+      Returns MIN(date) for first-run start date resolution.
+
+Internal methods:
+  _get_usage_data(date_str, limit) → DataFrame
+  filter(df) → DataFrame
+  _to_csv(df, connection_id) → str
 """
 
 import io
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import polars as pl
 
@@ -26,9 +30,6 @@ from litellm._logging import verbose_proxy_logger
 # dus.* selects all columns from LiteLLM_DailyUserSpend so that any new
 # columns added to that table in future LiteLLM versions are automatically
 # included in the export without requiring a code change here.
-# Only specific non-overlapping columns are selected from the JOIN tables to
-# avoid ambiguity (spend, user_id, team_id, created_at etc. exist in multiple
-# tables and cannot be selected via wildcards).
 _USAGE_QUERY = """
 SELECT
     dus.*,
@@ -46,9 +47,6 @@ WHERE dus.date = $1
 ORDER BY dus.date, dus.user_id, dus.model ASC
 """
 
-# Use SQL MIN() rather than Prisma find_first(order={"date": "asc"}) because
-# date is stored as a STRING column (YYYY-MM-DD). String-sort is equivalent
-# for well-formed dates but MIN() in SQL is authoritative and handles NULLs.
 _EARLIEST_DATE_QUERY = 'SELECT MIN(date) AS earliest FROM "LiteLLM_DailyUserSpend"'
 
 
@@ -56,7 +54,7 @@ class Exporter:
     """Fetch LiteLLM spend data from Postgres and transform to CSV."""
 
     # ------------------------------------------------------------------
-    # Database access
+    # DB access helper
     # ------------------------------------------------------------------
 
     @property
@@ -70,15 +68,51 @@ class Exporter:
             )
         return prisma_client
 
-    async def get_usage_data(
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    async def export(
+        self,
+        date_str: str,
+        connection_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Tuple[pl.DataFrame, str]:
+        """Fetch, filter, and serialize spend data for one calendar date.
+
+        Args:
+            date_str:      Date in YYYY-MM-DD format.
+            connection_id: Added as a column in the CSV output.
+            limit:         Cap on rows fetched from the database.
+
+        Returns:
+            (filtered_df, csv_str) — caller uses len(filtered_df) for the
+            record count and csv_str for the upload payload.
+            Returns (empty DataFrame, "") when there is no data.
+        """
+        df = await self._get_usage_data(date_str=date_str, limit=limit)
+        df = self.filter(df)
+        csv = self._to_csv(df, connection_id=connection_id)
+        return df, csv
+
+    async def get_earliest_date(self) -> Optional[str]:
+        """Return the earliest date string (YYYY-MM-DD) in LiteLLM_DailyUserSpend, or None."""
+        client = self._prisma_client
+        rows = await client.db.query_raw(_EARLIEST_DATE_QUERY)
+        if rows and rows[0].get("earliest") is not None:
+            return str(rows[0]["earliest"])[:10]
+        return None
+
+    # ------------------------------------------------------------------
+    # Internal methods
+    # ------------------------------------------------------------------
+
+    async def _get_usage_data(
         self,
         date_str: str,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Retrieve spend rows for a single calendar date (YYYY-MM-DD).
-
-        Filters by dus.date so each export covers exactly one complete day.
-        """
+        """Retrieve raw spend rows for a single calendar date."""
         client = self._prisma_client
 
         query = _USAGE_QUERY
@@ -91,34 +125,14 @@ class Exporter:
         db_response = await client.db.query_raw(query, *params)
         return pl.DataFrame(db_response, infer_schema_length=None)
 
-    async def get_earliest_date(self) -> Optional[str]:
-        """Return the earliest date string (YYYY-MM-DD) in LiteLLM_DailyUserSpend, or None."""
-        client = self._prisma_client
-        rows = await client.db.query_raw(_EARLIEST_DATE_QUERY)
-        if rows and rows[0].get("earliest") is not None:
-            return str(rows[0]["earliest"])[:10]
-        return None
-
-    # ------------------------------------------------------------------
-    # Transform
-    # ------------------------------------------------------------------
-
     def filter(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Drop rows with zero successful_requests — they have no billable output."""
+        """Drop rows with zero successful_requests — no billable output."""
         if "successful_requests" not in df.columns:
             return df
         return df.filter(pl.col("successful_requests") > 0)
 
-    def to_csv(self, df: pl.DataFrame, connection_id: Optional[str] = None) -> str:
-        """Serialise a DataFrame to CSV, adding a connection_id column if provided.
-
-        Args:
-            df: Polars DataFrame. Caller should run filter() first.
-            connection_id: Optional identifier added as a column.
-
-        Returns:
-            CSV string (header + data rows). Empty string if DataFrame is empty.
-        """
+    def _to_csv(self, df: pl.DataFrame, connection_id: Optional[str] = None) -> str:
+        """Serialize a filtered DataFrame to CSV, adding connection_id column if provided."""
         if df.is_empty():
             verbose_proxy_logger.debug("Exporter: empty DataFrame, nothing to export")
             return ""
