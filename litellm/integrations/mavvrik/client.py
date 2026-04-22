@@ -138,10 +138,11 @@ class Client:
 
         Raises RuntimeError if the call fails or the response is missing the URL.
         """
-        # datetime param is the request timestamp required by Mavvrik API for URL signing.
-        # name is the GCS object name (YYYY-MM-DD for scheduled exports, or test names).
-        today = _dt.now(_tz.utc).date().isoformat()
-        params = {"name": date_str, "type": "metrics", "datetime": today}
+        # Both name and datetime are set to date_str so the GCS object path is:
+        #   {connectionType}/{connectionId}/{type}/{date_str}
+        # This gives each calendar date its own object — backfills write N objects,
+        # not one overwritten N times.
+        params = {"name": date_str, "type": "metrics", "datetime": date_str}
         resp = await self._request(
             "GET", self.upload_url, headers=self._auth_headers, params=params
         )
