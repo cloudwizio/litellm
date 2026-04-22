@@ -4,7 +4,7 @@ Responsibility: extract data from LiteLLM's database and convert it to CSV.
 
 Public interface:
   export(date_str, connection_id, limit) → (DataFrame, csv_str)
-      Single entry point: fetch → filter → serialize. Used by Service.export/dry_run.
+      Single entry point: fetch → serialize. Used by Service.export/dry_run.
 
   get_earliest_date() → Optional[str]
       Returns MIN(date) for first-run start date resolution.
@@ -12,7 +12,6 @@ Public interface:
 Internal methods:
   _stream_pages(date_str, connection_id, page_size) → AsyncIterator[str]
   _get_usage_data(date_str, limit) → DataFrame
-  _filter(df) → DataFrame
   _to_csv(df, connection_id) → str
 
 DB not connected: all methods log a warning and return empty/None — never raise.
@@ -81,12 +80,14 @@ class Exporter:
         connection_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Tuple[pl.DataFrame, str]:
-        """Fetch, filter, and serialize spend data for one calendar date.
+        """Fetch and serialize spend data for one calendar date.
 
-        Returns (empty DataFrame, "") when there is no data or no DB.
+        All rows are exported — including failed requests. Mavvrik decides
+        what to do with them on the ingestion side.
+
+        Returns (df, csv_str). Returns (empty DataFrame, "") when no data or no DB.
         """
         df = await self._get_usage_data(date_str=date_str, limit=limit)
-        df = self._filter(df)
         csv = self._to_csv(df, connection_id=connection_id)
         return df, csv
 
@@ -96,11 +97,11 @@ class Exporter:
         connection_id: Optional[str] = None,
         page_size: int = 10_000,
     ) -> AsyncIterator[str]:
-        """Yield CSV text in pages — one page of rows at a time (header included on first page).
+        """Yield CSV text in pages — one page of rows at a time (header on first page).
 
         Uses LIMIT/OFFSET pagination so only page_size rows are in memory at once.
+        All rows exported — including failed requests.
         Yields nothing when DB is not connected or no rows exist for the date.
-        Called exclusively by Uploader._stream_upload() via Orchestrator._export().
         """
         client = self._prisma_client
         if client is None:
@@ -121,33 +122,26 @@ class Exporter:
             )
 
             if not rows:
-                break  # no data (or exhausted all pages) — yield nothing more
+                break
 
             df = pl.DataFrame(rows, infer_schema_length=None)
-            df = self._filter(df)
-
-            if df.is_empty():
-                offset += page_size
-                if len(rows) < page_size:
-                    break
-                continue  # all rows filtered out — fetch next page
 
             buf = io.StringIO()
             if not header_written:
                 if connection_id:
                     df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
-                df.write_csv(buf)  # includes header
+                df.write_csv(buf)
                 header_written = True
             else:
                 if connection_id:
                     df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
-                df.write_csv(buf, include_header=False)  # rows only
+                df.write_csv(buf, include_header=False)
 
             yield buf.getvalue()
 
             offset += page_size
             if len(rows) < page_size:
-                break  # last page reached
+                break
 
     async def get_earliest_date(self) -> Optional[str]:
         """Return MIN(date) from LiteLLM_DailyUserSpend, or None.
@@ -175,7 +169,7 @@ class Exporter:
         date_str: str,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Retrieve raw spend rows for a single calendar date.
+        """Retrieve all spend rows for a single calendar date.
 
         Returns empty DataFrame when DB is not connected.
         """
@@ -197,14 +191,8 @@ class Exporter:
         db_response = await client.db.query_raw(query, *params)
         return pl.DataFrame(db_response, infer_schema_length=None)
 
-    def _filter(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Drop rows with zero successful_requests — no billable output."""
-        if "successful_requests" not in df.columns:
-            return df
-        return df.filter(pl.col("successful_requests") > 0)
-
     def _to_csv(self, df: pl.DataFrame, connection_id: Optional[str] = None) -> str:
-        """Serialize a filtered DataFrame to CSV, adding connection_id column if provided."""
+        """Serialize a DataFrame to CSV, adding connection_id column if provided."""
         if df.is_empty():
             verbose_proxy_logger.debug("Exporter: empty DataFrame, nothing to export")
             return ""

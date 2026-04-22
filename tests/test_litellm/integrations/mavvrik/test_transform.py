@@ -37,34 +37,6 @@ def _make_df(**kwargs) -> pl.DataFrame:
     return pl.DataFrame(defaults)
 
 
-class TestExporterFilter:
-    def test_drops_zero_successful_requests(self):
-        exporter = Exporter()
-        df = _make_df(successful_requests=[0])
-        assert exporter._filter(df).is_empty()
-
-    def test_keeps_nonzero_successful_requests(self):
-        exporter = Exporter()
-        df = _make_df(successful_requests=[3])
-        assert len(exporter._filter(df)) == 1
-
-    def test_all_zero_returns_empty(self):
-        exporter = Exporter()
-        df = pl.DataFrame({"successful_requests": [0, 0], "spend": [1.0, 2.0]})
-        assert exporter._filter(df).is_empty()
-
-    def test_mixed_keeps_nonzero_rows_only(self):
-        exporter = Exporter()
-        df = pl.DataFrame({"successful_requests": [5, 0, 3], "spend": [1.0, 2.0, 3.0]})
-        result = exporter._filter(df)
-        assert len(result) == 2
-
-    def test_no_column_returns_df_unchanged(self):
-        exporter = Exporter()
-        df = pl.DataFrame({"spend": [1.0, 2.0]})
-        assert len(exporter._filter(df)) == 2
-
-
 class TestExporterToCsv:
     def test_empty_dataframe_returns_empty_string(self):
         transformer = Exporter()
@@ -120,14 +92,6 @@ class TestExporterToCsv:
         df = _make_df(model=["claude-3-5-sonnet"])
         result = transformer._to_csv(df)
         assert "claude-3-5-sonnet" in result
-
-    def test_no_successful_requests_column_no_filter_applied(self):
-        """If column is absent, all rows are included (no filter)."""
-        transformer = Exporter()
-        df = pl.DataFrame({"date": ["2025-01-19"], "spend": [5.0], "model": ["gpt-4"]})
-        result = transformer._to_csv(df)
-        lines = [l for l in result.strip().split("\n") if l]
-        assert len(lines) == 2  # header + 1 data row
 
     def test_multiple_rows_all_in_output(self):
         transformer = Exporter()
@@ -352,37 +316,6 @@ class TestExporterExport:
         assert df.is_empty()
         assert csv == ""
 
-    @pytest.mark.asyncio
-    async def test_export_filters_zero_successful_requests(self):
-        """export() excludes rows with successful_requests == 0."""
-        exporter = Exporter()
-        mock_client = MagicMock()
-        mock_rows = [
-            {
-                "date": "2026-04-10",
-                "model": "gpt-4o",
-                "spend": 0.01,
-                "successful_requests": 0,
-            },
-            {
-                "date": "2026-04-10",
-                "model": "gpt-4o",
-                "spend": 0.02,
-                "successful_requests": 3,
-            },
-        ]
-        mock_client.db.query_raw = AsyncMock(return_value=mock_rows)
-
-        with patch.object(
-            type(exporter),
-            "_prisma_client",
-            new_callable=lambda: property(lambda self: mock_client),
-        ):
-            df, csv = await exporter.export(date_str="2026-04-10", connection_id="c")
-
-        assert len(df) == 1
-        assert "0.02" in csv
-
 
 # ---------------------------------------------------------------------------
 # Exporter._stream_pages — async generator for paginated DB fetch
@@ -441,40 +374,6 @@ class TestStreamPages:
                 chunks.append(chunk)
 
         assert chunks == []
-
-    @pytest.mark.asyncio
-    async def test_filters_zero_successful_requests(self):
-        """_stream_pages() drops rows with successful_requests == 0."""
-        exporter = Exporter()
-        mock_rows = [
-            {
-                "date": "2026-04-10",
-                "model": "gpt-4o",
-                "spend": 0.01,
-                "successful_requests": 0,
-            },
-            {
-                "date": "2026-04-10",
-                "model": "gpt-4o",
-                "spend": 0.02,
-                "successful_requests": 3,
-            },
-        ]
-        mock_client = MagicMock()
-        mock_client.db.query_raw = AsyncMock(side_effect=[mock_rows, []])
-
-        with patch.object(
-            type(exporter),
-            "_prisma_client",
-            new_callable=lambda: property(lambda self: mock_client),
-        ):
-            chunks = []
-            async for chunk in exporter._stream_pages("2026-04-10", connection_id="c"):
-                chunks.append(chunk)
-
-        combined = "".join(chunks)
-        assert "0.02" in combined
-        assert "0.01" not in combined
 
     @pytest.mark.asyncio
     async def test_paginates_using_offset(self):
@@ -573,11 +472,3 @@ class TestExporterNoDb:
             async for chunk in exporter._stream_pages("2026-04-10", connection_id="c"):
                 chunks.append(chunk)
         assert chunks == []
-
-    def test_filter_is_private(self):
-        """The method must be named _filter not filter."""
-        exporter = Exporter()
-        assert hasattr(exporter, "_filter"), "_filter method missing"
-        assert not hasattr(
-            exporter, "filter"
-        ), "filter should not exist — must be _filter"
