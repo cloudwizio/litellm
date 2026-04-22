@@ -245,28 +245,54 @@ class Uploader:
 
         Intermediate chunks: Content-Range: bytes X-Y/*  → expect 308
         Final chunk:         Content-Range: bytes X-Y/T  → expect 200/201
+        Retries on 5xx; raises immediately on 4xx.
         """
         end = offset + len(chunk) - 1
         total_str = str(offset + len(chunk)) if final else "*"
         content_range = f"bytes {offset}-{end}/{total_str}"
         expected_status = {200, 201} if final else {308}
+        last_exc: Exception = RuntimeError("unknown error")
 
         async with httpx.AsyncClient() as http:
-            resp = await http.put(
-                session_uri,
-                headers={
-                    "Content-Type": "application/gzip",
-                    "Content-Range": content_range,
-                },
-                content=chunk,
-                timeout=120.0,
-            )
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    resp = await http.put(
+                        session_uri,
+                        headers={
+                            "Content-Type": "application/gzip",
+                            "Content-Range": content_range,
+                        },
+                        content=chunk,
+                        timeout=120.0,
+                    )
 
-        if resp.status_code not in expected_status:
-            raise RuntimeError(
-                f"GCS PUT chunk failed: {resp.status_code} "
-                f"(expected {expected_status}): {resp.text[:200]}"
-            )
+                    if resp.status_code in expected_status:
+                        return
+
+                    last_exc = RuntimeError(
+                        f"GCS PUT chunk failed: {resp.status_code} "
+                        f"(expected {expected_status}): {resp.text[:200]}"
+                    )
+                    if resp.status_code < 500:
+                        raise last_exc
+
+                except httpx.RequestError as exc:
+                    last_exc = exc
+
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _RETRY_BACKOFF_BASE * (2**attempt)
+                    verbose_proxy_logger.warning(
+                        "uploader: chunk PUT attempt %d/%d failed, retrying in %.1fs: %s",
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        wait,
+                        last_exc,
+                    )
+                    await asyncio.sleep(wait)
+
+        raise RuntimeError(
+            f"GCS PUT chunk failed after {_MAX_RETRIES} attempts: {last_exc}"
+        )
 
     # ------------------------------------------------------------------
     # Helpers

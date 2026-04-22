@@ -41,28 +41,28 @@ class TestExporterFilter:
     def test_drops_zero_successful_requests(self):
         exporter = Exporter()
         df = _make_df(successful_requests=[0])
-        assert exporter.filter(df).is_empty()
+        assert exporter._filter(df).is_empty()
 
     def test_keeps_nonzero_successful_requests(self):
         exporter = Exporter()
         df = _make_df(successful_requests=[3])
-        assert len(exporter.filter(df)) == 1
+        assert len(exporter._filter(df)) == 1
 
     def test_all_zero_returns_empty(self):
         exporter = Exporter()
         df = pl.DataFrame({"successful_requests": [0, 0], "spend": [1.0, 2.0]})
-        assert exporter.filter(df).is_empty()
+        assert exporter._filter(df).is_empty()
 
     def test_mixed_keeps_nonzero_rows_only(self):
         exporter = Exporter()
         df = pl.DataFrame({"successful_requests": [5, 0, 3], "spend": [1.0, 2.0, 3.0]})
-        result = exporter.filter(df)
+        result = exporter._filter(df)
         assert len(result) == 2
 
     def test_no_column_returns_df_unchanged(self):
         exporter = Exporter()
         df = pl.DataFrame({"spend": [1.0, 2.0]})
-        assert len(exporter.filter(df)) == 2
+        assert len(exporter._filter(df)) == 2
 
 
 class TestExporterToCsv:
@@ -424,7 +424,7 @@ class TestStreamPages:
 
     @pytest.mark.asyncio
     async def test_yields_nothing_when_db_empty(self):
-        """_stream_pages() yields only header when DB returns no rows."""
+        """_stream_pages() yields nothing when DB returns no rows."""
         exporter = Exporter()
         mock_client = MagicMock()
         mock_client.db.query_raw = AsyncMock(return_value=[])
@@ -440,9 +440,7 @@ class TestStreamPages:
             ):
                 chunks.append(chunk)
 
-        # only header, no data rows
-        assert len(chunks) == 1
-        assert "date" in chunks[0]
+        assert chunks == []
 
     @pytest.mark.asyncio
     async def test_filters_zero_successful_requests(self):
@@ -514,3 +512,72 @@ class TestStreamPages:
         assert len(captured_queries) == 2
         assert captured_queries[0][-1] == 0  # first OFFSET is 0
         assert captured_queries[1][-1] == 3  # second OFFSET is page_size
+
+
+# ---------------------------------------------------------------------------
+# Exporter — no DB connected: log warning, return gracefully
+# ---------------------------------------------------------------------------
+
+
+class TestExporterNoDb:
+    @pytest.mark.asyncio
+    async def test_get_usage_data_returns_empty_when_no_db(self):
+        """_get_usage_data returns empty DataFrame when DB not connected."""
+        exporter = Exporter()
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: None),
+        ):
+            df = await exporter._get_usage_data("2026-04-10")
+        assert df.is_empty()
+
+    @pytest.mark.asyncio
+    async def test_get_earliest_date_returns_none_when_no_db(self):
+        """get_earliest_date returns None when DB not connected."""
+        exporter = Exporter()
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: None),
+        ):
+            result = await exporter.get_earliest_date()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_stream_pages_yields_nothing_when_no_db(self):
+        """_stream_pages yields nothing when DB not connected."""
+        exporter = Exporter()
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: None),
+        ):
+            chunks = []
+            async for chunk in exporter._stream_pages("2026-04-10", connection_id="c"):
+                chunks.append(chunk)
+        assert chunks == []
+
+    @pytest.mark.asyncio
+    async def test_stream_pages_yields_nothing_when_db_empty(self):
+        """_stream_pages yields nothing when DB returns no rows for the date."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=[])
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            chunks = []
+            async for chunk in exporter._stream_pages("2026-04-10", connection_id="c"):
+                chunks.append(chunk)
+        assert chunks == []
+
+    def test_filter_is_private(self):
+        """The method must be named _filter not filter."""
+        exporter = Exporter()
+        assert hasattr(exporter, "_filter"), "_filter method missing"
+        assert not hasattr(
+            exporter, "filter"
+        ), "filter should not exist — must be _filter"

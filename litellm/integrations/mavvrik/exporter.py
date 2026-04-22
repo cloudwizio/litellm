@@ -4,15 +4,20 @@ Responsibility: extract data from LiteLLM's database and convert it to CSV.
 
 Public interface:
   export(date_str, connection_id, limit) → (DataFrame, csv_str)
-      Single entry point: fetch → filter → serialize. Used by Orchestrator.
+      Single entry point: fetch → filter → serialize. Used by Service.export/dry_run.
 
   get_earliest_date() → Optional[str]
       Returns MIN(date) for first-run start date resolution.
 
 Internal methods:
+  _stream_pages(date_str, connection_id, page_size) → AsyncIterator[str]
   _get_usage_data(date_str, limit) → DataFrame
-  filter(df) → DataFrame
+  _filter(df) → DataFrame
   _to_csv(df, connection_id) → str
+
+DB not connected: all methods log a warning and return empty/None — never raise.
+The scheduler skips the date gracefully; user-triggered endpoints surface the
+missing-DB error through Settings._ensure_prisma_client() before reaching here.
 """
 
 import io
@@ -49,33 +54,22 @@ ORDER BY dus.date, dus.user_id, dus.model ASC
 
 _EARLIEST_DATE_QUERY = 'SELECT MIN(date) AS earliest FROM "LiteLLM_DailyUserSpend"'
 
-# Fallback header used when DB is empty — derived from the known query columns.
-_USAGE_HEADER = (
-    "date,user_id,api_key,model,model_group,custom_llm_provider,"
-    "prompt_tokens,completion_tokens,spend,api_requests,successful_requests,"
-    "failed_requests,cache_creation_input_tokens,cache_read_input_tokens,"
-    "created_at,updated_at,id,team_id,api_key_alias,organization_id,"
-    "team_alias,user_email,user_alias\n"
-)
-
 
 class Exporter:
     """Fetch LiteLLM spend data from Postgres and transform to CSV."""
 
     # ------------------------------------------------------------------
-    # DB access helper
+    # DB access helper — returns None when DB not connected (never raises)
     # ------------------------------------------------------------------
 
     @property
     def _prisma_client(self):
-        from litellm.proxy.proxy_server import prisma_client
+        try:
+            from litellm.proxy.proxy_server import prisma_client
 
-        if prisma_client is None:
-            raise RuntimeError(
-                "Database not connected. Connect a database to your proxy — "
-                "https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
-            )
-        return prisma_client
+            return prisma_client  # may be None if DB not yet connected
+        except ImportError:
+            return None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -89,18 +83,10 @@ class Exporter:
     ) -> Tuple[pl.DataFrame, str]:
         """Fetch, filter, and serialize spend data for one calendar date.
 
-        Args:
-            date_str:      Date in YYYY-MM-DD format.
-            connection_id: Added as a column in the CSV output.
-            limit:         Cap on rows fetched from the database.
-
-        Returns:
-            (filtered_df, csv_str) — caller uses len(filtered_df) for the
-            record count and csv_str for the upload payload.
-            Returns (empty DataFrame, "") when there is no data.
+        Returns (empty DataFrame, "") when there is no data or no DB.
         """
         df = await self._get_usage_data(date_str=date_str, limit=limit)
-        df = self.filter(df)
+        df = self._filter(df)
         csv = self._to_csv(df, connection_id=connection_id)
         return df, csv
 
@@ -110,19 +96,23 @@ class Exporter:
         connection_id: Optional[str] = None,
         page_size: int = 10_000,
     ) -> AsyncIterator[str]:
-        """Yield CSV text in pages — header first, then one page of rows at a time.
+        """Yield CSV text in pages — one page of rows at a time (header included on first page).
 
         Uses LIMIT/OFFSET pagination so only page_size rows are in memory at once.
-        Stops when a page returns fewer rows than page_size (last page reached).
+        Yields nothing when DB is not connected or no rows exist for the date.
         Called exclusively by Uploader._stream_upload() via Orchestrator._export().
         """
-        # Build a one-row DataFrame just to get the header columns from the schema.
-        # We yield the header once then write subsequent pages without it.
+        client = self._prisma_client
+        if client is None:
+            verbose_proxy_logger.warning(
+                "Exporter: database not connected, skipping stream for %s", date_str
+            )
+            return
+
         header_written = False
         offset = 0
 
         while True:
-            client = self._prisma_client
             rows = await client.db.query_raw(
                 _USAGE_QUERY + " LIMIT $2 OFFSET $3",
                 date_str,
@@ -131,36 +121,46 @@ class Exporter:
             )
 
             if not rows:
-                if not header_written:
-                    # Empty table — yield header only so caller knows columns
-                    yield _USAGE_HEADER
-                break
+                break  # no data (or exhausted all pages) — yield nothing more
 
             df = pl.DataFrame(rows, infer_schema_length=None)
-            df = self.filter(df)
+            df = self._filter(df)
 
+            if df.is_empty():
+                offset += page_size
+                if len(rows) < page_size:
+                    break
+                continue  # all rows filtered out — fetch next page
+
+            buf = io.StringIO()
             if not header_written:
-                # First non-empty page — derive header from actual columns
                 if connection_id:
                     df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
-                buf = io.StringIO()
-                df.write_csv(buf)
-                yield buf.getvalue()
+                df.write_csv(buf)  # includes header
                 header_written = True
             else:
                 if connection_id:
                     df = df.with_columns(pl.lit(connection_id).alias("connection_id"))
-                buf = io.StringIO()
-                df.write_csv(buf, include_header=False)
-                yield buf.getvalue()
+                df.write_csv(buf, include_header=False)  # rows only
+
+            yield buf.getvalue()
 
             offset += page_size
             if len(rows) < page_size:
-                break  # last page — fewer rows than requested
+                break  # last page reached
 
     async def get_earliest_date(self) -> Optional[str]:
-        """Return the earliest date string (YYYY-MM-DD) in LiteLLM_DailyUserSpend, or None."""
+        """Return MIN(date) from LiteLLM_DailyUserSpend, or None.
+
+        Returns None when DB is not connected — caller treats it as "no history".
+        """
         client = self._prisma_client
+        if client is None:
+            verbose_proxy_logger.warning(
+                "Exporter: database not connected, cannot determine earliest date"
+            )
+            return None
+
         rows = await client.db.query_raw(_EARLIEST_DATE_QUERY)
         if rows and rows[0].get("earliest") is not None:
             return str(rows[0]["earliest"])[:10]
@@ -175,8 +175,17 @@ class Exporter:
         date_str: str,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Retrieve raw spend rows for a single calendar date."""
+        """Retrieve raw spend rows for a single calendar date.
+
+        Returns empty DataFrame when DB is not connected.
+        """
         client = self._prisma_client
+        if client is None:
+            verbose_proxy_logger.warning(
+                "Exporter: database not connected, returning empty data for %s",
+                date_str,
+            )
+            return pl.DataFrame()
 
         query = _USAGE_QUERY
         params: List[Any] = [date_str]
@@ -188,7 +197,7 @@ class Exporter:
         db_response = await client.db.query_raw(query, *params)
         return pl.DataFrame(db_response, infer_schema_length=None)
 
-    def filter(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _filter(self, df: pl.DataFrame) -> pl.DataFrame:
         """Drop rows with zero successful_requests — no billable output."""
         if "successful_requests" not in df.columns:
             return df

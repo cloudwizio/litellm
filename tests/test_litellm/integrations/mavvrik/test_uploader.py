@@ -505,3 +505,47 @@ class TestStreamUpload:
 
         cr = captured[0]["Content-Range"]
         assert cr == "bytes 256-355/356"
+
+
+# ---------------------------------------------------------------------------
+# _put_chunk — retry on 5xx
+# ---------------------------------------------------------------------------
+
+
+class TestPutChunkRetry:
+    @pytest.mark.asyncio
+    async def test_put_chunk_retries_on_5xx_then_raises(self):
+        """_put_chunk retries on 5xx and raises after exhausting retries."""
+        u = _make_uploader()
+        resp_5xx = _mock_http_response(503, text="unavailable")
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            http = MagicMock()
+            http.put = AsyncMock(return_value=resp_5xx)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="failed after"):
+                await u._put_chunk("https://session", b"data", offset=0, final=False)
+
+        assert http.put.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_put_chunk_raises_immediately_on_4xx(self):
+        """_put_chunk does not retry on 4xx."""
+        u = _make_uploader()
+        resp_4xx = _mock_http_response(403, text="Forbidden")
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            http = MagicMock()
+            http.put = AsyncMock(return_value=resp_4xx)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError):
+                await u._put_chunk("https://session", b"data", offset=0, final=False)
+
+        assert http.put.call_count == 1
+        mock_sleep.assert_not_called()
