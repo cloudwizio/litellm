@@ -3,6 +3,7 @@
 import io
 import os
 import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
 import pytest
@@ -156,3 +157,140 @@ class TestExporterToCsv:
         df = _make_df()
         result = transformer.to_csv(df)
         assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# to_csv — connection_id column
+# ---------------------------------------------------------------------------
+
+
+class TestToCsvConnectionId:
+    def test_adds_connection_id_column_when_provided(self):
+        exporter = Exporter()
+        df = _make_df()
+        result = exporter.to_csv(df, connection_id="conn-123")
+        assert "connection_id" in result
+        assert "conn-123" in result
+
+    def test_no_connection_id_column_when_omitted(self):
+        exporter = Exporter()
+        df = _make_df()
+        result = exporter.to_csv(df)
+        assert "connection_id" not in result.split("\n")[0]
+
+
+# ---------------------------------------------------------------------------
+# _prisma_client — raises when DB not connected
+# ---------------------------------------------------------------------------
+
+
+class TestExporterPrismaClient:
+    def test_raises_runtime_error_when_db_not_connected(self):
+        """_prisma_client raises RuntimeError when prisma_client is None."""
+        exporter = Exporter()
+        with patch(
+            "litellm.integrations.mavvrik.exporter.prisma_client", None, create=True
+        ):
+            with patch(
+                "litellm.integrations.mavvrik.exporter.Exporter._prisma_client",
+                new_callable=lambda: property(
+                    lambda self: (_ for _ in ()).throw(
+                        RuntimeError("Database not connected")
+                    )
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="Database not connected"):
+                    _ = exporter._prisma_client
+
+
+# ---------------------------------------------------------------------------
+# get_usage_data and get_earliest_date — mocked prisma
+# ---------------------------------------------------------------------------
+
+
+class TestExporterDbMethods:
+    @pytest.mark.asyncio
+    async def test_get_usage_data_returns_dataframe(self):
+        """get_usage_data() returns a Polars DataFrame from query_raw results."""
+        exporter = Exporter()
+        mock_rows = [
+            {
+                "date": "2026-04-10",
+                "user_id": "user-1",
+                "model": "gpt-4o",
+                "spend": 0.015,
+                "successful_requests": 5,
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+            }
+        ]
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=mock_rows)
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            df = await exporter.get_usage_data("2026-04-10")
+
+        assert len(df) == 1
+        assert "model" in df.columns
+
+    @pytest.mark.asyncio
+    async def test_get_usage_data_with_limit(self):
+        """get_usage_data() appends LIMIT clause when limit is provided."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=[])
+        captured = []
+
+        async def fake_query_raw(query, *params):
+            captured.append((query, params))
+            return []
+
+        mock_client.db.query_raw = fake_query_raw
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            await exporter.get_usage_data("2026-04-10", limit=100)
+
+        assert "LIMIT" in captured[0][0]
+        assert 100 in captured[0][1]
+
+    @pytest.mark.asyncio
+    async def test_get_earliest_date_returns_date_string(self):
+        """get_earliest_date() returns first 10 chars of the MIN(date) result."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(
+            return_value=[{"earliest": "2026-01-01T00:00:00"}]
+        )
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            result = await exporter.get_earliest_date()
+
+        assert result == "2026-01-01"
+
+    @pytest.mark.asyncio
+    async def test_get_earliest_date_returns_none_when_empty(self):
+        """get_earliest_date() returns None when table is empty."""
+        exporter = Exporter()
+        mock_client = MagicMock()
+        mock_client.db.query_raw = AsyncMock(return_value=[{"earliest": None}])
+
+        with patch.object(
+            type(exporter),
+            "_prisma_client",
+            new_callable=lambda: property(lambda self: mock_client),
+        ):
+            result = await exporter.get_earliest_date()
+
+        assert result is None

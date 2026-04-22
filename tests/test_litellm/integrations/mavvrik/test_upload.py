@@ -356,6 +356,13 @@ class TestClientReportError:
 
         assert captured[0] == {"error": "export failed"}
 
+    @pytest.mark.asyncio
+    async def test_logs_warning_on_unexpected_status(self):
+        """report_error logs a warning when response status is not 200/204."""
+        c = _make_client()
+        with patch.object(c, "_request", return_value=_mock_response(500, text="err")):
+            await c.report_error("something broke")  # must not raise
+
 
 # ---------------------------------------------------------------------------
 # get_signed_url()

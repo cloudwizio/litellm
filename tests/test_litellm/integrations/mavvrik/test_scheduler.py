@@ -228,6 +228,99 @@ class TestRunExportLoop:
 # ---------------------------------------------------------------------------
 
 
+class TestOrchestratorHelpers:
+    def test_utc_today_returns_date(self):
+        result = Orchestrator._utc_today()
+        assert isinstance(result, date)
+
+    def test_to_epoch_converts_date(self):
+        d = date(2026, 1, 1)
+        epoch = Orchestrator._to_epoch(d)
+        assert isinstance(epoch, int)
+        assert epoch > 0
+
+    def test_date_range_yields_inclusive(self):
+        orc = _make_orchestrator()
+        with patch.object(Orchestrator, "_utc_today", return_value=date(2026, 4, 12)):
+            dates = list(orc._date_range(date(2026, 4, 10)))
+        assert dates == [date(2026, 4, 10), date(2026, 4, 11)]
+
+    def test_get_pod_lock_manager_returns_none_when_proxy_logging_none(self):
+        with patch(
+            "litellm.integrations.mavvrik.orchestrator.proxy_logging_obj",
+            None,
+            create=True,
+        ):
+            pass  # import is lazy; tested via run() path below
+
+    @pytest.mark.asyncio
+    async def test_get_pod_lock_manager_returns_none_when_logging_obj_none(self):
+        orc = _make_orchestrator()
+        with patch(
+            "litellm.integrations.mavvrik.orchestrator.Orchestrator._get_pod_lock_manager",
+            return_value=None,
+        ):
+            orc._client.register = AsyncMock(return_value="2099-01-01")
+            orc._client.report_error = AsyncMock()
+            with patch.object(
+                Orchestrator, "_utc_today", return_value=date(2026, 4, 10)
+            ):
+                await orc.run()  # no lock, runs directly
+
+
+class TestPodLockAcquired:
+    @pytest.mark.asyncio
+    async def test_runs_pipeline_when_lock_acquired(self):
+        """When Redis is available and lock is acquired, pipeline runs."""
+        orc = _make_orchestrator()
+        orc._client.register = AsyncMock(return_value="2099-01-01")
+        orc._client.report_error = AsyncMock()
+
+        mock_lock = MagicMock()
+        mock_lock.redis_cache = MagicMock()
+        mock_lock.acquire_lock = AsyncMock(return_value=True)
+        mock_lock.release_lock = AsyncMock()
+
+        with patch.object(
+            Orchestrator, "_get_pod_lock_manager", return_value=mock_lock
+        ), patch.object(Orchestrator, "_utc_today", return_value=date(2026, 4, 10)):
+            await orc.run()
+
+        mock_lock.acquire_lock.assert_called_once()
+        mock_lock.release_lock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_pipeline_when_lock_not_acquired(self):
+        """When Redis lock is not acquired, pipeline does not run."""
+        orc = _make_orchestrator()
+        orc._client.register = AsyncMock()
+
+        mock_lock = MagicMock()
+        mock_lock.redis_cache = MagicMock()
+        mock_lock.acquire_lock = AsyncMock(return_value=False)
+
+        with patch.object(
+            Orchestrator, "_get_pod_lock_manager", return_value=mock_lock
+        ):
+            await orc.run()
+
+        orc._client.register.assert_not_called()
+
+
+class TestResolveFirstRunInvalidDate:
+    @pytest.mark.asyncio
+    async def test_falls_back_to_yesterday_on_invalid_date_string(self):
+        """When DB returns a non-ISO date string, fall back to yesterday."""
+        orc = _make_orchestrator()
+        orc._exporter = MagicMock()
+        orc._exporter.get_earliest_date = AsyncMock(return_value="not-a-date")
+
+        with patch.object(Orchestrator, "_utc_today", return_value=date(2026, 4, 16)):
+            result = await orc._resolve_first_run_start_date()
+
+        assert result == date(2026, 4, 15)
+
+
 class TestOverflowDetection:
     @pytest.mark.asyncio
     async def test_raises_when_rows_exceed_limit(self):

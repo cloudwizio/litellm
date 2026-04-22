@@ -160,6 +160,22 @@ class TestInitiateResumableUpload:
 
         assert http.post.call_count == 3
 
+    @pytest.mark.asyncio
+    async def test_retries_on_request_error_then_raises(self):
+        u = _make_uploader()
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            http = MagicMock()
+            http.post = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="failed after"):
+                await u._initiate_resumable_upload("https://signed-url")
+
+        assert http.post.call_count == 3
+
 
 # ---------------------------------------------------------------------------
 # _finalize_upload
@@ -205,6 +221,25 @@ class TestFinalizeUpload:
                 await u._finalize_upload("https://session-uri", b"gzip-bytes")
 
     @pytest.mark.asyncio
+    async def test_raises_immediately_on_4xx(self):
+        """4xx from GCS is not retried — raises immediately."""
+        u = _make_uploader()
+        resp = _mock_http_response(403, text="Forbidden")
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            http = MagicMock()
+            http.put = AsyncMock(return_value=resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="finalize"):
+                await u._finalize_upload("https://session-uri", b"gzip-bytes")
+
+        mock_sleep.assert_not_called()
+        assert http.put.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_sends_gzip_bytes_as_body(self):
         u = _make_uploader()
         resp = _mock_http_response(200)
@@ -233,6 +268,22 @@ class TestFinalizeUpload:
         ):
             http = MagicMock()
             http.put = AsyncMock(return_value=resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            with pytest.raises(RuntimeError, match="failed after"):
+                await u._finalize_upload("https://session-uri", b"data")
+
+        assert http.put.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_retries_on_request_error_then_raises(self):
+        u = _make_uploader()
+
+        with patch("httpx.AsyncClient") as mock_cls, patch(
+            "asyncio.sleep", new_callable=AsyncMock
+        ):
+            http = MagicMock()
+            http.put = AsyncMock(side_effect=httpx.ConnectError("timeout"))
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
             with pytest.raises(RuntimeError, match="failed after"):
