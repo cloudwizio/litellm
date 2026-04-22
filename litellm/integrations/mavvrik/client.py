@@ -13,7 +13,6 @@ Transport layer (shared by all four methods):
   _assert_ok()  — raises RuntimeError on unexpected status; fast-fails on 4xx
 """
 
-import asyncio
 import platform
 from datetime import datetime as _dt
 from datetime import timezone as _tz
@@ -23,9 +22,7 @@ import httpx
 import litellm as _litellm
 
 from litellm._logging import verbose_proxy_logger
-
-_MAX_RETRIES = 3
-_RETRY_BACKOFF_BASE = 1.0  # seconds; doubles each retry
+from litellm.integrations.mavvrik._http import http_request
 
 
 class Client:
@@ -158,7 +155,7 @@ class Client:
         return signed_url
 
     # ------------------------------------------------------------------
-    # Transport layer
+    # Transport layer — delegates to shared http_request
     # ------------------------------------------------------------------
 
     async def _request(
@@ -171,54 +168,18 @@ class Client:
         params: Optional[Dict[str, str]] = None,
         content: Optional[bytes] = None,
         timeout: float = 30.0,
+        label: str = "",
     ) -> httpx.Response:
-        """Execute an HTTP request with retry and exponential backoff.
-
-        Retries up to _MAX_RETRIES times on 5xx responses and network errors.
-        4xx responses are not retried — they indicate a client-side problem.
-
-        Returns the httpx.Response. Callers use _assert_ok() to check the status.
-        """
-        last_exc: Exception = RuntimeError("unknown error")
-
-        async with httpx.AsyncClient() as http:
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    resp = await http.request(
-                        method,
-                        url,
-                        headers=headers,
-                        json=json,
-                        params=params,
-                        content=content,
-                        timeout=timeout,
-                    )
-
-                    if resp.status_code < 500:
-                        return resp
-
-                    last_exc = RuntimeError(
-                        f"{method} {url} → {resp.status_code} {resp.text[:200]}"
-                    )
-
-                except httpx.RequestError as exc:
-                    last_exc = exc
-
-                if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF_BASE * (2**attempt)
-                    verbose_proxy_logger.warning(
-                        "client: %s %s attempt %d/%d failed, retrying in %.1fs: %s",
-                        method,
-                        url,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        wait,
-                        last_exc,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise RuntimeError(
-            f"client: {method} {url} failed after {_MAX_RETRIES} attempts: {last_exc}"
+        """Execute a Mavvrik API request via the shared retry transport."""
+        return await http_request(
+            method,
+            url,
+            headers=headers,
+            json=json,
+            params=params,
+            content=content,
+            timeout=timeout,
+            label=label,
         )
 
     @staticmethod

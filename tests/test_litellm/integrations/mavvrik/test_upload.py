@@ -65,93 +65,41 @@ class TestClientInit:
 
 
 # ---------------------------------------------------------------------------
-# _request — transport layer
+# _request — delegates to http_request (retry behaviour tested in test_http.py)
 # ---------------------------------------------------------------------------
 
 
 class TestClientRequest:
     @pytest.mark.asyncio
-    async def test_returns_response_on_success(self):
+    async def test_delegates_to_http_request(self):
+        """_request() delegates to the shared http_request transport."""
         c = _make_client()
         mock_resp = _mock_response(200)
 
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = AsyncMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            resp = await c._request("GET", "https://example.com")
+        with patch(
+            "litellm.integrations.mavvrik.client.http_request",
+            new_callable=AsyncMock,
+            return_value=mock_resp,
+        ) as mock_http:
+            resp = await c._request(
+                "GET",
+                "https://example.com",
+                headers={"x-api-key": "k"},
+                json={"a": 1},
+                label="test",
+            )
 
         assert resp.status_code == 200
-
-    @pytest.mark.asyncio
-    async def test_returns_4xx_without_retry(self):
-        c = _make_client()
-        mock_resp = _mock_response(401, text="Unauthorized")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
-            http = AsyncMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            resp = await c._request("GET", "https://example.com")
-
-        assert resp.status_code == 401
-        mock_sleep.assert_not_called()
-        assert http.request.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_retries_on_5xx_then_raises(self):
-        c = _make_client()
-        mock_resp = _mock_response(503, text="Service Unavailable")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ):
-            http = AsyncMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            with pytest.raises(RuntimeError, match="failed after"):
-                await c._request("GET", "https://example.com")
-
-        assert http.request.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_retries_on_network_error_then_raises(self):
-        c = _make_client()
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ):
-            http = AsyncMock()
-            http.request = AsyncMock(side_effect=httpx.ConnectError("timeout"))
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            with pytest.raises(RuntimeError, match="failed after"):
-                await c._request("GET", "https://example.com")
-
-        assert http.request.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_succeeds_on_second_attempt(self):
-        c = _make_client()
-        fail = _mock_response(503, text="err")
-        ok = _mock_response(200)
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ):
-            http = AsyncMock()
-            http.request = AsyncMock(side_effect=[fail, ok])
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            resp = await c._request("GET", "https://example.com")
-
-        assert resp.status_code == 200
-        assert http.request.call_count == 2
+        mock_http.assert_called_once_with(
+            "GET",
+            "https://example.com",
+            headers={"x-api-key": "k"},
+            json={"a": 1},
+            params=None,
+            content=None,
+            timeout=30.0,
+            label="test",
+        )
 
 
 # ---------------------------------------------------------------------------

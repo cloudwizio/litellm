@@ -85,7 +85,11 @@ class TestInitiateResumableUpload:
         resp = _mock_http_response(
             201, headers={"Location": "https://gcs.example.com/session"}
         )
-        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            new_callable=AsyncMock,
+            return_value=resp,
+        ):
             session_uri = await u._initiate_resumable_upload("https://signed-url")
         assert session_uri == "https://gcs.example.com/session"
 
@@ -93,7 +97,11 @@ class TestInitiateResumableUpload:
     async def test_raises_on_missing_location_header(self):
         u = _make_uploader()
         resp = _mock_http_response(201, headers={})
-        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            new_callable=AsyncMock,
+            return_value=resp,
+        ):
             with pytest.raises(RuntimeError, match="Location"):
                 await u._initiate_resumable_upload("https://signed-url")
 
@@ -101,7 +109,11 @@ class TestInitiateResumableUpload:
     async def test_raises_on_non_201(self):
         u = _make_uploader()
         resp = _mock_http_response(403, text="Forbidden")
-        with patch.object(u, "_gcs_request", new_callable=AsyncMock, return_value=resp):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            new_callable=AsyncMock,
+            return_value=resp,
+        ):
             with pytest.raises(RuntimeError, match="initiate"):
                 await u._initiate_resumable_upload("https://signed-url")
 
@@ -117,7 +129,10 @@ class TestInitiateResumableUpload:
             captured.append(headers)
             return resp
 
-        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            side_effect=fake_gcs_request,
+        ):
             await u._initiate_resumable_upload("https://signed-url")
 
         assert captured[0]["Content-Type"] == "application/gzip"
@@ -127,9 +142,8 @@ class TestInitiateResumableUpload:
     async def test_retries_on_5xx_then_raises(self):
         """Retry behaviour is tested in TestGcsRequest — just confirm 5xx propagates."""
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             side_effect=RuntimeError("failed after 3 attempts"),
         ):
@@ -139,9 +153,8 @@ class TestInitiateResumableUpload:
     @pytest.mark.asyncio
     async def test_retries_on_request_error_then_raises(self):
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             side_effect=RuntimeError("failed after 3 attempts"),
         ):
@@ -158,9 +171,8 @@ class TestFinalizeUpload:
     @pytest.mark.asyncio
     async def test_accepts_200(self):
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             return_value=_mock_http_response(200),
         ):
@@ -169,9 +181,8 @@ class TestFinalizeUpload:
     @pytest.mark.asyncio
     async def test_accepts_201(self):
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             return_value=_mock_http_response(201),
         ):
@@ -180,9 +191,8 @@ class TestFinalizeUpload:
     @pytest.mark.asyncio
     async def test_raises_on_error_status(self):
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             return_value=_mock_http_response(500, text="Server Error"),
         ):
@@ -193,9 +203,8 @@ class TestFinalizeUpload:
     async def test_raises_immediately_on_4xx(self):
         """4xx from GCS returns immediately from _gcs_request — raises in _finalize."""
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             return_value=_mock_http_response(403, text="Forbidden"),
         ):
@@ -211,7 +220,10 @@ class TestFinalizeUpload:
             captured.append(content)
             return _mock_http_response(200)
 
-        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            side_effect=fake_gcs_request,
+        ):
             await u._finalize_upload("https://session-uri", b"my-gzip-data")
 
         assert captured[0] == b"my-gzip-data"
@@ -220,9 +232,8 @@ class TestFinalizeUpload:
     async def test_retries_on_5xx_then_raises(self):
         """Retry behaviour owned by _gcs_request — confirm propagation."""
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             side_effect=RuntimeError("failed after 3 attempts"),
         ):
@@ -232,9 +243,8 @@ class TestFinalizeUpload:
     @pytest.mark.asyncio
     async def test_retries_on_request_error_then_raises(self):
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             side_effect=RuntimeError("failed after 3 attempts"),
         ):
@@ -422,7 +432,10 @@ class TestStreamUpload:
             captured.append(headers)
             return _mock_http_response(308)
 
-        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            side_effect=fake_gcs_request,
+        ):
             await u._put_chunk("https://session", b"x" * 100, offset=0, final=False)
 
         assert "Content-Range" in captured[0]
@@ -438,7 +451,10 @@ class TestStreamUpload:
             captured.append(headers)
             return _mock_http_response(200)
 
-        with patch.object(u, "_gcs_request", side_effect=fake_gcs_request):
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
+            side_effect=fake_gcs_request,
+        ):
             await u._put_chunk("https://session", b"x" * 100, offset=256, final=True)
 
         cr = captured[0]["Content-Range"]
@@ -455,9 +471,8 @@ class TestPutChunkRetry:
     async def test_put_chunk_retries_on_5xx_then_raises(self):
         """_put_chunk propagates retry failure from _gcs_request."""
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             side_effect=RuntimeError("failed after 3 attempts"),
         ):
@@ -468,9 +483,8 @@ class TestPutChunkRetry:
     async def test_put_chunk_raises_immediately_on_4xx(self):
         """4xx returned by _gcs_request causes _put_chunk to raise."""
         u = _make_uploader()
-        with patch.object(
-            u,
-            "_gcs_request",
+        with patch(
+            "litellm.integrations.mavvrik.uploader.http_request",
             new_callable=AsyncMock,
             return_value=_mock_http_response(403, text="Forbidden"),
         ):
@@ -478,73 +492,4 @@ class TestPutChunkRetry:
                 await u._put_chunk("https://session", b"data", offset=0, final=False)
 
 
-# ---------------------------------------------------------------------------
-# _gcs_request — shared GCS transport (mirrors Client._request for GCS)
-# ---------------------------------------------------------------------------
-
-
-class TestGcsRequest:
-    @pytest.mark.asyncio
-    async def test_returns_response_on_success(self):
-        u = _make_uploader()
-        mock_resp = _mock_http_response(201)
-
-        with patch("httpx.AsyncClient") as mock_cls:
-            http = MagicMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            resp = await u._gcs_request("POST", "https://gcs.example.com", timeout=30.0)
-
-        assert resp.status_code == 201
-
-    @pytest.mark.asyncio
-    async def test_returns_4xx_without_retry(self):
-        u = _make_uploader()
-        mock_resp = _mock_http_response(403, text="Forbidden")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
-            http = MagicMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            resp = await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
-
-        assert resp.status_code == 403
-        assert http.request.call_count == 1
-        mock_sleep.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_retries_on_5xx_then_raises(self):
-        u = _make_uploader()
-        mock_resp = _mock_http_response(503, text="unavailable")
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ):
-            http = MagicMock()
-            http.request = AsyncMock(return_value=mock_resp)
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            with pytest.raises(RuntimeError, match="failed after"):
-                await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
-
-        assert http.request.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_retries_on_network_error_then_raises(self):
-        u = _make_uploader()
-
-        with patch("httpx.AsyncClient") as mock_cls, patch(
-            "asyncio.sleep", new_callable=AsyncMock
-        ):
-            http = MagicMock()
-            http.request = AsyncMock(side_effect=httpx.ConnectError("timeout"))
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=http)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            with pytest.raises(RuntimeError, match="failed after"):
-                await u._gcs_request("PUT", "https://gcs.example.com", timeout=30.0)
-
-        assert http.request.call_count == 3
+# _gcs_request removed — transport tested in test_http.py via http_request

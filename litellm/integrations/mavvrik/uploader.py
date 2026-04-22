@@ -19,22 +19,19 @@ GCS resumable upload protocol reference:
   https://cloud.google.com/storage/docs/resumable-uploads
 """
 
-import asyncio
 import gzip
 import io
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
 from litellm._logging import verbose_proxy_logger
+from litellm.integrations.mavvrik._http import http_request
 
 if TYPE_CHECKING:
     from litellm.integrations.mavvrik.client import Client
 else:
     Client = Any
-
-_MAX_RETRIES = 3
-_RETRY_BACKOFF_BASE = 1.0  # seconds; doubles each retry
 
 # GCS requires intermediate chunks to be exactly this size (256 KB aligned).
 # Only the final chunk can be smaller.
@@ -90,7 +87,7 @@ class Uploader:
         Returns the session URI from the Location response header.
         """
         metadata = b'{"contentEncoding":"gzip","contentDisposition":"attachment"}'
-        resp = await self._gcs_request(
+        resp = await http_request(
             "POST",
             signed_url,
             headers={"Content-Type": "application/gzip", "x-goog-resumable": "start"},
@@ -109,7 +106,7 @@ class Uploader:
 
     async def _finalize_upload(self, session_uri: str, gzip_bytes: bytes) -> None:
         """PUT gzip bytes to the GCS session URI to complete the bulk upload."""
-        resp = await self._gcs_request(
+        resp = await http_request(
             "PUT",
             session_uri,
             headers={
@@ -144,7 +141,7 @@ class Uploader:
         content_range = f"bytes {offset}-{end}/{total_str}"
         expected = {200, 201} if final else {308}
 
-        resp = await self._gcs_request(
+        resp = await http_request(
             "PUT",
             session_uri,
             headers={
@@ -218,59 +215,6 @@ class Uploader:
             "uploader: stream upload complete — %d bytes for date %s", total, date_str
         )
         return total
-
-    # ------------------------------------------------------------------
-    # Transport layer — shared by all GCS steps
-    # ------------------------------------------------------------------
-
-    async def _gcs_request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Optional[Dict[str, str]] = None,
-        content: Optional[bytes] = None,
-        timeout: float = 30.0,
-        label: str = "",
-    ) -> httpx.Response:
-        """Execute a GCS HTTP request with retry and exponential backoff.
-
-        Mirrors Client._request() but for GCS — no Mavvrik auth header.
-        Retries on 5xx and network errors; returns 4xx immediately (no retry).
-        """
-        last_exc: Exception = RuntimeError("unknown error")
-
-        async with httpx.AsyncClient() as http:
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    resp = await http.request(
-                        method, url, headers=headers, content=content, timeout=timeout
-                    )
-                    if resp.status_code < 500:
-                        return resp
-
-                    last_exc = RuntimeError(
-                        f"GCS {label or method} {resp.status_code}: {resp.text[:200]}"
-                    )
-
-                except httpx.RequestError as exc:
-                    last_exc = exc
-
-                if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF_BASE * (2**attempt)
-                    verbose_proxy_logger.warning(
-                        "uploader: %s attempt %d/%d failed, retrying in %.1fs: %s",
-                        label or method,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        wait,
-                        last_exc,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise RuntimeError(
-            f"GCS {label or method} failed after {_MAX_RETRIES} attempts: {last_exc}"
-        )
 
     # ------------------------------------------------------------------
     # Helpers
