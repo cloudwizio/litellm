@@ -13,13 +13,11 @@ Transport layer (shared by all four methods):
   _assert_ok()  — raises RuntimeError on unexpected status; fast-fails on 4xx
 """
 
-import platform
 from datetime import datetime as _dt
 from datetime import timezone as _tz
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
-import litellm as _litellm
 
 from litellm._logging import verbose_proxy_logger
 from litellm.integrations.mavvrik._http import http_request
@@ -71,11 +69,7 @@ class Client:
         Returns None when the remote marker is absent or zero (first run).
         Raises RuntimeError if the call fails.
         """
-        body: dict = {
-            "name": self._connection_id,
-            "version": getattr(_litellm, "__version__", "0.0.0"),
-            "arch": platform.machine(),
-        }
+        body: dict = {"name": self._connection_id}
         resp = await self._request(
             "POST", self.agent_url, headers=self._auth_headers, json=body
         )
