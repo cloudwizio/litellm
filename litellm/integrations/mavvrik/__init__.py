@@ -2,8 +2,8 @@
 
 Module layout:
   exporter.py      — Exporter (DB queries + DataFrame → CSV transform)
-  uploader.py      — Uploader (export → upload pipeline)
-  client.py        — Client (3-step signed URL upload + register/advance_marker)
+  uploader.py      — Uploader (GCS resumable upload protocol)
+  client.py        — Client (Mavvrik REST API calls + retry transport)
   settings.py      — Settings (config detection and persistence)
   orchestrator.py  — Orchestrator (pod lock + register → date loop → upload → advance)
 
@@ -11,17 +11,41 @@ Public facade:
   Service — used by mavvrik_endpoints.py; all business logic lives here.
 """
 
+import os
 from datetime import datetime, timedelta
 from datetime import timezone as _tz
 from typing import Optional
 
+import polars as pl
+
 from litellm._logging import verbose_proxy_logger
+from litellm.constants import MAVVRIK_MAX_FETCHED_DATA_RECORDS
+from litellm.integrations.mavvrik.client import Client
+from litellm.integrations.mavvrik.exporter import Exporter
 from litellm.integrations.mavvrik.logger import Logger
 from litellm.integrations.mavvrik.orchestrator import Orchestrator
 from litellm.integrations.mavvrik.settings import Settings
 from litellm.integrations.mavvrik.uploader import Uploader
 
-__all__ = ["Logger", "Orchestrator", "Service", "Settings", "Uploader"]
+__all__ = [
+    "Client",
+    "Exporter",
+    "Logger",
+    "Orchestrator",
+    "Service",
+    "Settings",
+    "Uploader",
+]
+
+
+def _build_client(data: dict) -> Client:
+    """Build a Client from loaded settings dict."""
+    return Client(
+        api_key=data.get("api_key") or os.getenv("MAVVRIK_API_KEY", ""),
+        api_endpoint=data.get("api_endpoint") or os.getenv("MAVVRIK_API_ENDPOINT", ""),
+        connection_id=data.get("connection_id")
+        or os.getenv("MAVVRIK_CONNECTION_ID", ""),
+    )
 
 
 class Service:
@@ -69,10 +93,6 @@ class Service:
     ) -> dict:
         """Save credentials and schedule the export job.
 
-        The export marker (cursor) is owned exclusively by the Mavvrik API —
-        it is retrieved via register() at the start of each scheduled run,
-        not stored locally.
-
         Returns:
             {"message": str, "status": "success"}
         """
@@ -88,7 +108,6 @@ class Service:
             MAVVRIK_EXPORT_INTERVAL_MINUTES,
             MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME,
         )
-        from litellm.integrations.mavvrik import Orchestrator, Uploader
 
         import litellm.proxy.proxy_server as _pserver
 
@@ -102,16 +121,14 @@ class Service:
                 "status": "success",
             }
 
-        uploader = Uploader(
+        client = Client(
             api_key=api_key,
             api_endpoint=api_endpoint,
             connection_id=connection_id,
         )
-        orchestrator = Orchestrator(uploader=uploader)
-        # replace_existing=True ensures repeated calls to /mavvrik/init are safe —
-        # the existing job is replaced with the new orchestrator instance rather
-        # than accumulating duplicate jobs. The same job id is also used at
-        # startup in proxy_server.py; whichever runs last wins, which is correct.
+        uploader = Uploader(client=client)
+        orchestrator = Orchestrator(client=client, uploader=uploader)
+        # replace_existing=True ensures repeated /mavvrik/init calls are safe.
         _scheduler.add_job(
             orchestrator.run,
             "interval",
@@ -136,22 +153,15 @@ class Service:
     async def get_settings(self) -> dict:
         """Load and mask Mavvrik settings.
 
-        Falls back to env vars when no DB settings exist, so operators using
-        the env-var-only setup see ``status: "configured"`` rather than
-        ``status: "not_configured"`` while exports are running.
+        Falls back to env vars when no DB settings exist.
 
         Returns:
             A dict with keys: api_key_masked, api_endpoint, connection_id, status.
-            ``status`` is ``"not_configured"`` when neither DB nor env vars are set.
-            The export marker is owned by the Mavvrik API and is not stored locally.
         """
-        import os
-
         from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 
         data = await self._settings.load()
 
-        # Fall back to env vars for operators who never called /mavvrik/init.
         if not data and self._settings.has_env_vars:
             data = {
                 "api_key": os.getenv("MAVVRIK_API_KEY", ""),
@@ -188,14 +198,9 @@ class Service:
     ) -> dict:
         """Merge new credential values into existing settings and persist.
 
-        The export marker is owned by the Mavvrik API and cannot be set here.
-
         Raises:
-            LookupError: when no existing settings are found (use POST /mavvrik/init instead).
+            LookupError: when no existing settings are found.
             ValueError: when a merge would leave a required field empty.
-
-        Returns:
-            {"message": str, "status": "success"}
         """
         current = await self._settings.load()
         if not current:
@@ -229,15 +234,11 @@ class Service:
 
         Raises:
             LookupError: when no settings exist in the database.
-
-        Returns:
-            {"message": str, "status": "success"}
         """
         from litellm.constants import MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME
 
         import litellm.proxy.proxy_server as _pserver
 
-        # Raises LookupError if not configured.
         await self._settings.delete()
 
         _scheduler = getattr(_pserver, "scheduler", None)
@@ -256,7 +257,7 @@ class Service:
         date_str: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> dict:
-        """Upload spend data for a calendar date to Mavvrik.
+        """Fetch spend data and upload to Mavvrik for a calendar date.
 
         Args:
             date_str: YYYY-MM-DD.  Defaults to yesterday (UTC) when omitted.
@@ -268,25 +269,32 @@ class Service:
         Returns:
             {"message": str, "status": "success", "records_exported": int}
         """
-        from litellm.integrations.mavvrik.uploader import Uploader
-
         data = await self._settings.load()
 
-        # Allow export when credentials come from env vars (zero-config setup).
         if not data and not self._settings.has_env_vars:
             raise ValueError("Mavvrik not configured. Call POST /mavvrik/init first.")
 
         date_str = date_str or self._yesterday()
+        effective_limit = limit or MAVVRIK_MAX_FETCHED_DATA_RECORDS
 
-        uploader = Uploader(
-            api_key=data.get("api_key") if data else None,
-            api_endpoint=data.get("api_endpoint") if data else None,
-            connection_id=data.get("connection_id") if data else None,
-        )
-        records_exported = await uploader.upload_usage_data(
-            date_str=date_str,
-            limit=limit,
-        )
+        client = _build_client(data)
+        uploader = Uploader(client=client)
+        exporter = Exporter()
+
+        df = await exporter.get_usage_data(date_str=date_str, limit=effective_limit)
+        df = exporter.filter(df)
+
+        if df.is_empty():
+            return {
+                "message": f"No data for {date_str}",
+                "status": "success",
+                "records_exported": 0,
+            }
+
+        records_exported = len(df)
+        csv_payload = exporter.to_csv(df, connection_id=client.connection_id)
+        await uploader.upload(csv_payload, date_str=date_str)
+
         return {
             "message": f"Mavvrik export completed successfully for {date_str}",
             "status": "success",
@@ -311,35 +319,56 @@ class Service:
         Returns:
             {"message": str, "status": "success", "dry_run_data": dict, "summary": dict}
         """
-        from litellm.integrations.mavvrik.uploader import Uploader
-
         data = await self._settings.load()
         if not data and not self._settings.has_env_vars:
             raise ValueError("Mavvrik not configured. Call POST /mavvrik/init first.")
 
         date_str = date_str or self._yesterday()
+        effective_limit = limit or MAVVRIK_MAX_FETCHED_DATA_RECORDS
 
-        uploader = Uploader(
-            api_key=data.get("api_key") if data else None,
-            api_endpoint=data.get("api_endpoint") if data else None,
-            connection_id=data.get("connection_id") if data else None,
+        client = _build_client(data)
+        exporter = Exporter()
+
+        df = await exporter.get_usage_data(date_str=date_str, limit=effective_limit)
+
+        if df.is_empty():
+            return {
+                "message": "Mavvrik dry run completed",
+                "status": "success",
+                "dry_run_data": {"usage_data": [], "csv_preview": ""},
+                "summary": {
+                    "total_records": 0,
+                    "total_cost": 0.0,
+                    "total_tokens": 0,
+                    "unique_models": 0,
+                    "unique_teams": 0,
+                },
+            }
+
+        df = exporter.filter(df)
+        csv_payload = exporter.to_csv(df, connection_id=client.connection_id)
+
+        total_cost = float(df["spend"].sum()) if "spend" in df.columns else 0.0
+        total_tokens = (
+            int((df["prompt_tokens"].sum() or 0) + (df["completion_tokens"].sum() or 0))
+            if "prompt_tokens" in df.columns
+            else 0
         )
-        result = await uploader.dry_run(date_str=date_str, limit=limit)
+        unique_models = df["model"].n_unique() if "model" in df.columns else 0
+        unique_teams = df["team_id"].n_unique() if "team_id" in df.columns else 0
+
         return {
             "message": "Mavvrik dry run completed",
             "status": "success",
             "dry_run_data": {
-                "usage_data": result["usage_data"],
-                "csv_preview": result["csv_preview"],
+                "usage_data": df.head(50).to_dicts(),
+                "csv_preview": csv_payload[:5000] if csv_payload else "",
             },
-            "summary": result["summary"],
+            "summary": {
+                "total_records": len(df),
+                "total_cost": total_cost,
+                "total_tokens": total_tokens,
+                "unique_models": unique_models,
+                "unique_teams": unique_teams,
+            },
         }
-
-
-from litellm.integrations.mavvrik.client import Client
-from litellm.integrations.mavvrik.exporter import Exporter
-from litellm.integrations.mavvrik.orchestrator import Orchestrator
-from litellm.integrations.mavvrik.settings import Settings
-from litellm.integrations.mavvrik.uploader import Uploader
-
-__all__ = ["Client", "Exporter", "Orchestrator", "Service", "Settings", "Uploader"]
