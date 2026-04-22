@@ -243,7 +243,10 @@ class Service:
 
         _scheduler = getattr(_pserver, "scheduler", None)
         if _scheduler is not None:
-            _scheduler.remove_job(MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME)
+            try:
+                _scheduler.remove_job(MAVVRIK_EXPORT_USAGE_DATA_JOB_NAME)
+            except Exception:
+                pass  # job may not exist if scheduler was restarted
 
         verbose_proxy_logger.info("mavvrik settings deleted")
         return {"message": "Mavvrik settings deleted successfully", "status": "success"}

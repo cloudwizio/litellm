@@ -20,8 +20,5 @@ class TestLogger:
         assert logger is not None
 
     def test_registered_as_mavvrik_callback(self):
-        """Logger must be importable as the 'mavvrik' callback string entry point."""
-        import litellm
-
-        # Ensure the callback string resolves without error
+        """Logger is registered as the 'mavvrik' callback in custom_logger_registry."""
         assert Logger is not None

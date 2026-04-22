@@ -100,8 +100,8 @@ class CustomLoggerRegistry:
         "bitbucket": BitBucketPromptManager,
         "gitlab": GitLabPromptManager,
         "cloudzero": CloudZeroLogger,
-        "mavvrik": MavvrikLogger,
         "focus": FocusLogger,
+        "mavvrik": MavvrikLogger,
         "vantage": VantageLogger,
         "posthog": PostHogLogger,
     }

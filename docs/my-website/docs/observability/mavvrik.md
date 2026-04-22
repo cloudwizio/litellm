@@ -10,21 +10,13 @@ LiteLLM provides an integration with Mavvrik, allowing you to export your LLM us
 | Property | Details |
 |----------|---------|
 | Description | Export LiteLLM daily usage data to Mavvrik |
-| callback name | `mavvrik` |
 | Supported Operations | Automatic daily data export, manual data export, dry run testing, cost and token usage tracking |
-| Data Format | CSV (gzip-compressed) |
+| Data Format | CSV (gzip-compressed, streamed page-by-page — no row limit) |
 | Export Frequency | Hourly scheduler check — exports complete calendar days (never today's partial data) |
 
 ## Setup
 
-### Step 1: Add the Mavvrik callback to `config.yaml`
-
-```yaml
-litellm_settings:
-  callbacks: ["mavvrik"]
-```
-
-### Step 2: Set the Mavvrik credentials as environment variables
+### Step 1: Set the Mavvrik credentials as environment variables
 
 ```bash
 export MAVVRIK_API_KEY="mav_xxxxxxxxxx"
@@ -32,7 +24,7 @@ export MAVVRIK_API_ENDPOINT="https://api.mavvrik.dev/<TENANT_ID>"
 export MAVVRIK_CONNECTION_ID="litellm-prod"
 ```
 
-### Step 3: Start LiteLLM Proxy
+### Step 2: Start LiteLLM Proxy
 
 ```bash
 litellm --config /path/to/config.yaml
@@ -49,7 +41,6 @@ LiteLLM will schedule hourly exports automatically. Registration with the Mavvri
 | `MAVVRIK_CONNECTION_ID` | Yes | Connection/instance ID assigned by Mavvrik | `litellm-prod` |
 
 | `MAVVRIK_EXPORT_INTERVAL_MINUTES` | No | Scheduler check frequency in minutes (default: `60`) | `60` |
-| `MAVVRIK_MAX_FETCHED_DATA_RECORDS` | No | Max spend rows to fetch per export cycle (default: `50000`) | `50000` |
 
 ## Alternative Setup: API-Based Initialization
 

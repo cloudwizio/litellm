@@ -5,8 +5,7 @@ Responsibility: sequence the export steps and own the pod lock. Nothing else.
 Pipeline in _run_pipeline (one line per step):
   start, end = await self._register(), self._export_end_date()
   for export_date in self._date_range(start, end):
-      df, csv = await self._export(export_date)
-      await self._upload(csv, export_date)
+      await self._export(export_date)   # streams DB → GCS via _stream_pages/_stream_upload
       await self._advance(export_date)
 
 One try/except in _run_pipeline. No nested exception handling anywhere else.

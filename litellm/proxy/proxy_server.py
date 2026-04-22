@@ -6594,21 +6594,20 @@ class ProxyStartupEvent:
             Uploader as MavvrikUploader,
         )
 
-        mavvrik_settings = MavvrikSettings()
-        if await mavvrik_settings.is_setup():
-            mavvrik_data = await mavvrik_settings.load()
+        settings = MavvrikSettings()
+        if await settings.is_setup():
+            data = await settings.load()
             import os as _os
 
-            mavvrik_client = MavvrikClient(
-                api_key=mavvrik_data.get("api_key")
-                or _os.getenv("MAVVRIK_API_KEY", ""),
-                api_endpoint=mavvrik_data.get("api_endpoint")
+            client = MavvrikClient(
+                api_key=data.get("api_key") or _os.getenv("MAVVRIK_API_KEY", ""),
+                api_endpoint=data.get("api_endpoint")
                 or _os.getenv("MAVVRIK_API_ENDPOINT", ""),
-                connection_id=mavvrik_data.get("connection_id")
+                connection_id=data.get("connection_id")
                 or _os.getenv("MAVVRIK_CONNECTION_ID", ""),
             )
-            uploader = MavvrikUploader(client=mavvrik_client)
-            orchestrator = MavvrikOrchestrator(client=mavvrik_client, uploader=uploader)
+            uploader = MavvrikUploader(client=client)
+            orchestrator = MavvrikOrchestrator(client=client, uploader=uploader)
             scheduler.add_job(
                 orchestrator.run,
                 "interval",
@@ -6619,7 +6618,7 @@ class ProxyStartupEvent:
             verbose_proxy_logger.warning(
                 "Mavvrik: background export job scheduled every %d min (connection_id=%s)",
                 MAVVRIK_EXPORT_INTERVAL_MINUTES,
-                mavvrik_client.connection_id,
+                client.connection_id,
             )
 
         ########################################################
