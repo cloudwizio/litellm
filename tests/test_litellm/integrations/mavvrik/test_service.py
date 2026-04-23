@@ -107,7 +107,9 @@ class TestServiceInitialize:
 
         # If proxy_server already loaded, patch its scheduler directly too.
         real_pserver = sys.modules.get("litellm.proxy.proxy_server")
-        real_scheduler = getattr(real_pserver, "scheduler", "MISSING") if real_pserver else "MISSING"
+        real_scheduler = (
+            getattr(real_pserver, "scheduler", "MISSING") if real_pserver else "MISSING"
+        )
         if real_pserver:
             real_pserver.scheduler = mock_scheduler
 
