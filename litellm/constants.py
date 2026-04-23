@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 from litellm.litellm_core_utils.env_utils import get_env_int
 
@@ -1427,7 +1427,7 @@ APSCHEDULER_REPLACE_EXISTING = os.getenv(
     "1",
 ]  # always replace existing jobs
 
-# The number of tag entries are higher than number of user, team entries. This leads to a higher QPS. 
+# The number of tag entries are higher than number of user, team entries. This leads to a higher QPS.
 # This will run tag spcific tasks at a later time to smooth QPS
 DAILY_TAG_SPEND_BATCH_MULTIPLIER = 2.3
 

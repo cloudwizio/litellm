@@ -12,8 +12,8 @@ Steps 3 and 4 talk directly to GCS (no Mavvrik auth header).
 Step 2 is delegated to Client which owns all Mavvrik API calls.
 
 Transport layer (shared by all GCS steps):
-  _gcs_request() — single httpx call with retry + exponential backoff,
-                   mirrors Client._request() but for GCS (no auth header).
+  http_request() from _http.py — single httpx call with retry + exponential
+  backoff. Used by _initiate_resumable_upload, _finalize_upload, _put_chunk.
 
 GCS resumable upload protocol reference:
   https://cloud.google.com/storage/docs/resumable-uploads
@@ -22,8 +22,6 @@ GCS resumable upload protocol reference:
 import gzip
 import io
 from typing import TYPE_CHECKING, Any, AsyncIterator
-
-import httpx
 
 from litellm._logging import verbose_proxy_logger
 from litellm.integrations.mavvrik._http import http_request

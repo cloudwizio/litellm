@@ -173,7 +173,7 @@ LiteLLM exports daily spend aggregates from `LiteLLM_DailyUserSpend` as a CSV fi
 | `successful_requests` | Count of successful API calls |
 | `connection_id` | Your Mavvrik connection ID (added by LiteLLM) |
 
-Only rows with `successful_requests > 0` are exported — zero-request rows are skipped.
+All rows are exported, including rows where `successful_requests` is `0` (failed requests). Mavvrik handles filtering on their ingestion side.
 
 ## Advanced Configuration
 
@@ -225,12 +225,12 @@ curl -X DELETE "http://localhost:4000/mavvrik/delete" \
 
 4. **Missing credentials error on export**
    ```
-   MavvrikLogger: missing required config fields: ['api_key']
+   ValueError: Mavvrik not configured. Call POST /mavvrik/init first.
    ```
    Either set the `MAVVRIK_*` environment variables or call `POST /mavvrik/init` to store credentials in the database.
 
 5. **Export succeeds but `records_exported: 0`**
-   All rows for that date had `successful_requests == 0`. This is normal if the proxy received requests that day but all failed.
+   There are no rows in `LiteLLM_DailyUserSpend` for that date. Verify the proxy was receiving traffic and that spend tracking is enabled.
 
 ## Related Links
 

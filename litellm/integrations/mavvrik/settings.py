@@ -93,10 +93,13 @@ class Settings:
     async def load(self) -> dict:
         """Load and decrypt Mavvrik settings from the database.
 
-        Returns an empty dict when no row exists.
+        Returns an empty dict when no row exists or when the database is not
+        connected. Callers fall back to env vars when this returns {}.
         The ``api_key`` field is returned in plaintext (decrypted).
         """
-        client = self._ensure_prisma_client()
+        client = self._prisma_client
+        if client is None:
+            return {}
 
         row = await client.db.litellm_config.find_first(
             where={"param_name": _CONFIG_KEY}
