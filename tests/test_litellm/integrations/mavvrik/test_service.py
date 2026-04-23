@@ -97,22 +97,36 @@ class TestServiceInitialize:
 
         MockOrchestrator = MagicMock(side_effect=capture_orchestrator)
         mock_scheduler = MagicMock()
-        mock_pserver = _mock_proxy_server(scheduler=mock_scheduler)
 
+        # Build a mock proxy_server module with scheduler set.
+        # Use patch.dict to inject it — but also cover the case where
+        # proxy_server is already loaded in CI by overwriting its scheduler attr.
         import sys
 
-        with patch.dict(
-            sys.modules, {"litellm.proxy.proxy_server": mock_pserver}
-        ), patch("litellm.integrations.mavvrik.Client", MockClient), patch(
-            "litellm.integrations.mavvrik.Uploader", MockUploader
-        ), patch(
-            "litellm.integrations.mavvrik.Orchestrator", MockOrchestrator
-        ):
-            await svc.initialize(
-                api_key="key",
-                api_endpoint="https://api.mavvrik.dev/t",
-                connection_id="c-1",
-            )
+        mock_pserver = _mock_proxy_server(scheduler=mock_scheduler)
+
+        # If proxy_server already loaded, patch its scheduler directly too.
+        real_pserver = sys.modules.get("litellm.proxy.proxy_server")
+        real_scheduler = getattr(real_pserver, "scheduler", "MISSING") if real_pserver else "MISSING"
+        if real_pserver:
+            real_pserver.scheduler = mock_scheduler
+
+        try:
+            with patch.dict(
+                sys.modules, {"litellm.proxy.proxy_server": mock_pserver}
+            ), patch("litellm.integrations.mavvrik.Client", MockClient), patch(
+                "litellm.integrations.mavvrik.Uploader", MockUploader
+            ), patch(
+                "litellm.integrations.mavvrik.Orchestrator", MockOrchestrator
+            ):
+                await svc.initialize(
+                    api_key="key",
+                    api_endpoint="https://api.mavvrik.dev/t",
+                    connection_id="c-1",
+                )
+        finally:
+            if real_pserver and real_scheduler != "MISSING":
+                real_pserver.scheduler = real_scheduler
 
         MockClient.assert_called_once_with(
             api_key="key",
