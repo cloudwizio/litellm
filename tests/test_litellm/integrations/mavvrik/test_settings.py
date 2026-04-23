@@ -473,3 +473,15 @@ class TestEnsurePrismaClient:
         ):
             with pytest.raises(Exception, match="Database not connected"):
                 s._ensure_prisma_client()
+
+
+class TestLoadNoDb:
+    @pytest.mark.asyncio
+    async def test_load_returns_empty_when_no_db(self):
+        """load() returns {} when DB not connected — callers fall back to env vars."""
+        s = Settings()
+        with patch.object(
+            type(s), "_prisma_client", new_callable=lambda: property(lambda self: None)
+        ):
+            result = await s.load()
+        assert result == {}

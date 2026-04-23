@@ -493,3 +493,70 @@ class TestPutChunkRetry:
 
 
 # _gcs_request removed — transport tested in test_http.py via http_request
+
+
+class TestStreamUploadEdgeCases:
+    @pytest.mark.asyncio
+    async def test_skips_empty_string_chunks(self):
+        """_stream_upload skips empty string chunks without opening GCS session."""
+        u = _make_uploader()
+
+        async def pages_with_empty():
+            yield ""  # empty — should be skipped
+            yield "date,model\n"
+            yield "2026-04-01,gpt-4o\n"
+
+        with patch.object(
+            u.client, "get_signed_url", new_callable=AsyncMock, return_value="https://s"
+        ), patch.object(
+            u,
+            "_initiate_resumable_upload",
+            new_callable=AsyncMock,
+            return_value="https://sess",
+        ), patch.object(
+            u, "_put_chunk", new_callable=AsyncMock
+        ):
+            result = await u._stream_upload(pages_with_empty(), date_str="2026-04-01")
+
+        assert result > 0  # data was uploaded despite the empty first chunk
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_sends_intermediate_chunks_when_buffer_exceeds_threshold(self):
+        """_stream_upload sends intermediate PUT chunks when buffer exceeds 256KB.
+
+        Uses import random to generate incompressible data that won't shrink
+        below _GCS_CHUNK_SIZE after gzip compression.
+        """
+        import random, string
+
+        u = _make_uploader()
+        put_calls = []
+
+        async def fake_put(session_uri, chunk, offset, final):
+            put_calls.append({"size": len(chunk), "final": final})
+
+        # Use random printable chars — gzip can't compress this below raw size.
+        # 400KB of random data will produce ~400KB gzipped, exceeding 256KB.
+        rng = random.Random(42)
+        random_data = "".join(rng.choices(string.printable, k=400_000))
+
+        async def large_pages():
+            yield random_data
+
+        with patch.object(
+            u.client, "get_signed_url", new_callable=AsyncMock, return_value="https://s"
+        ), patch.object(
+            u,
+            "_initiate_resumable_upload",
+            new_callable=AsyncMock,
+            return_value="https://sess",
+        ), patch.object(
+            u, "_put_chunk", side_effect=fake_put
+        ):
+            await u._stream_upload(large_pages(), date_str="2026-04-01")
+
+        # At least one intermediate 256KB chunk must have been sent
+        intermediate = [c for c in put_calls if not c["final"]]
+        assert len(intermediate) >= 1
+        assert all(c["size"] == 256 * 1024 for c in intermediate)
