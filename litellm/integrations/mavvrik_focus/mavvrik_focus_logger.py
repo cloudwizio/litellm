@@ -77,7 +77,7 @@ class MavvrikFocusLogger(FocusLogger):
         scheduler: AsyncIOScheduler,
     ) -> None:
         """Register the Mavvrik FOCUS export job on the provided scheduler."""
-        loggers: List[CustomLogger] = [
+        loggers: List[MavvrikFocusLogger] = [
             cb
             for cb in litellm.logging_callback_manager.get_custom_loggers_for_type(
                 callback_type=MavvrikFocusLogger
