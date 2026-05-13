@@ -1,4 +1,9 @@
-"""Mavvrik API destination for FOCUS export."""
+"""Mavvrik GCS destination for FOCUS export.
+
+Flow:
+  1. GET /metrics/agent/ai/{connection_id}/upload-url → GCS signed URL
+  2. PUT <signed_url> with CSV content
+"""
 
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ def _validate_api_endpoint(api_endpoint: str) -> None:
 
 
 class FocusMavvrikDestination(FocusDestination):
-    """Upload FOCUS CSV exports to the Mavvrik ingestion API."""
+    """Upload FOCUS CSV exports to Mavvrik via GCS signed URL."""
 
     def __init__(
         self,
@@ -69,12 +74,52 @@ class FocusMavvrikDestination(FocusDestination):
         )
 
     @property
-    def _ingest_url(self) -> str:
-        return f"{self.api_endpoint}/metrics/agent/ai/{self.connection_id}/ingest"
+    def _upload_url_endpoint(self) -> str:
+        return f"{self.api_endpoint}/metrics/agent/ai/{self.connection_id}/upload-url"
 
     @property
     def _auth_headers(self) -> dict[str, str]:
-        return {"x-api-key": self.api_key}
+        return {"Content-Type": "application/json", "x-api-key": self.api_key}
+
+    async def _get_signed_url(self, date_str: str) -> str:
+        """GET upload-url endpoint → GCS signed URL for the given date."""
+        params = {"name": date_str, "type": "metrics", "datetime": date_str}
+        resp = await self._http.client.request(
+            method="GET",
+            url=self._upload_url_endpoint,
+            headers=self._auth_headers,
+            params=params,
+            timeout=30.0,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Mavvrik FOCUS destination: failed to get signed URL "
+                f"({resp.status_code}): {resp.text[:200]}"
+            )
+        signed_url = resp.json().get("url")
+        if not signed_url:
+            raise RuntimeError(
+                f"Mavvrik FOCUS destination: response missing 'url' field: {resp.json()}"
+            )
+        verbose_logger.debug(
+            "Mavvrik FOCUS destination: got signed URL for date %s", date_str
+        )
+        return signed_url
+
+    async def _upload_to_gcs(self, signed_url: str, content: bytes) -> None:
+        """PUT content to GCS signed URL."""
+        resp = await self._http.client.request(
+            method="PUT",
+            url=signed_url,
+            headers={"Content-Type": "text/csv"},
+            content=content,
+            timeout=120.0,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Mavvrik FOCUS destination: GCS upload failed "
+                f"({resp.status_code}): {resp.text[:200]}"
+            )
 
     async def deliver(
         self,
@@ -83,36 +128,28 @@ class FocusMavvrikDestination(FocusDestination):
         time_window: FocusTimeWindow,
         filename: str,
     ) -> None:
-        """POST FOCUS CSV content to the Mavvrik ingestion API."""
+        """Upload FOCUS CSV to Mavvrik via GCS signed URL.
+
+        Uses the start date of the time window as the object date key.
+        """
         if not content:
             verbose_logger.debug(
                 "Mavvrik FOCUS destination: empty content, skipping upload"
             )
             return
 
+        date_str = time_window.start_time.strftime("%Y-%m-%d")
+
         verbose_logger.debug(
-            "Mavvrik FOCUS destination: uploading %d bytes (%s) window=%s→%s",
+            "Mavvrik FOCUS destination: uploading %d bytes for date=%s (%s)",
             len(content),
+            date_str,
             filename,
-            time_window.start_time.date(),
-            time_window.end_time.date(),
         )
 
-        resp = await self._http.client.request(
-            method="POST",
-            url=self._ingest_url,
-            headers={**self._auth_headers, "Content-Type": "text/csv"},
-            content=content,
-            timeout=120.0,
-        )
-
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"Mavvrik FOCUS destination: upload failed with status "
-                f"{resp.status_code}: {resp.text[:200]}"
-            )
+        signed_url = await self._get_signed_url(date_str)
+        await self._upload_to_gcs(signed_url, content)
 
         verbose_logger.debug(
-            "Mavvrik FOCUS destination: upload complete, status=%d",
-            resp.status_code,
+            "Mavvrik FOCUS destination: upload complete for date=%s", date_str
         )
