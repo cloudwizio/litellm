@@ -127,17 +127,20 @@ class FocusMavvrikDestination(FocusDestination):
         return signed_url
 
     async def _upload_to_gcs(self, signed_url: str, content: bytes) -> None:
-        """PUT content to GCS signed URL."""
-        resp = await self._http.client.request(
-            method="PUT",
-            url=signed_url,
-            content=content,
-            timeout=120.0,
-        )
+        """PUT content to GCS signed URL using a bare httpx client.
+
+        GCS signed URLs are sensitive to extra headers — the shared litellm
+        httpx client adds user-agent/accept-encoding which are not in the
+        signed headers list and cause MalformedSecurityHeader errors.
+        """
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(signed_url, content=content, timeout=120.0)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"Mavvrik FOCUS destination: GCS upload failed "
-                f"({resp.status_code}): {resp.text[:200]}"
+                f"({resp.status_code}): {resp.text[:400]}"
             )
 
     async def deliver(
