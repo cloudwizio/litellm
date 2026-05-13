@@ -131,7 +131,6 @@ class FocusMavvrikDestination(FocusDestination):
         resp = await self._http.client.request(
             method="PUT",
             url=signed_url,
-            headers={"Content-Type": "text/csv"},
             content=content,
             timeout=120.0,
         )
