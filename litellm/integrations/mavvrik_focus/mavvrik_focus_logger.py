@@ -35,6 +35,7 @@ class MavvrikFocusLogger(FocusLogger):
             provider="mavvrik",
             export_format="csv",
             frequency=os.getenv("MAVVRIK_FOCUS_FREQUENCY", "hourly"),
+            interval_seconds=int(os.getenv("MAVVRIK_FOCUS_INTERVAL_SECONDS", 3600)),
             prefix="mavvrik_focus_exports",
             destination_config={
                 "api_key": os.getenv("MAVVRIK_API_KEY"),
