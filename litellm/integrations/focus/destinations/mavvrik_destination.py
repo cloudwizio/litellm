@@ -74,12 +74,32 @@ class FocusMavvrikDestination(FocusDestination):
         )
 
     @property
+    def _agent_url(self) -> str:
+        return f"{self.api_endpoint}/metrics/agent/ai/{self.connection_id}"
+
+    @property
     def _upload_url_endpoint(self) -> str:
         return f"{self.api_endpoint}/metrics/agent/ai/{self.connection_id}/upload-url"
 
     @property
     def _auth_headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json", "x-api-key": self.api_key}
+
+    async def _register(self) -> None:
+        """POST agent endpoint to register/initialize the connector."""
+        resp = await self._http.client.request(
+            method="POST",
+            url=self._agent_url,
+            headers=self._auth_headers,
+            json={"name": self.connection_id},
+            timeout=30.0,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Mavvrik FOCUS destination: register failed "
+                f"({resp.status_code}): {resp.text[:200]}"
+            )
+        verbose_logger.debug("Mavvrik FOCUS destination: connector registered")
 
     async def _get_signed_url(self, date_str: str) -> str:
         """GET upload-url endpoint → GCS signed URL for the given date."""
@@ -147,6 +167,7 @@ class FocusMavvrikDestination(FocusDestination):
             filename,
         )
 
+        await self._register()
         signed_url = await self._get_signed_url(date_str)
         await self._upload_to_gcs(signed_url, content)
 
