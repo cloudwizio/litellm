@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from .base import FocusDestination
 from .s3_destination import FocusS3Destination
+from .mavvrik_destination import FocusMavvrikDestination
 from .vantage_destination import FocusVantageDestination
 
 
@@ -29,6 +30,8 @@ class FocusDestinationFactory:
             return FocusS3Destination(prefix=prefix, config=normalized_config)
         if provider_lower == "vantage":
             return FocusVantageDestination(prefix=prefix, config=normalized_config)
+        if provider_lower == "mavvrik":
+            return FocusMavvrikDestination(prefix=prefix, config=normalized_config)
         raise NotImplementedError(
             f"Provider '{provider}' not supported for Focus export"
         )
@@ -71,6 +74,13 @@ class FocusDestinationFactory:
                 raise ValueError(
                     "VANTAGE_INTEGRATION_TOKEN must be provided for Vantage exports"
                 )
+            return {k: v for k, v in resolved.items() if v is not None}
+        if provider == "mavvrik":
+            resolved = {
+                "api_key": overrides.get("api_key") or os.getenv("MAVVRIK_API_KEY"),
+                "api_endpoint": overrides.get("api_endpoint") or os.getenv("MAVVRIK_API_ENDPOINT"),
+                "connection_id": overrides.get("connection_id") or os.getenv("MAVVRIK_CONNECTION_ID"),
+            }
             return {k: v for k, v in resolved.items() if v is not None}
         raise NotImplementedError(
             f"Provider '{provider}' not supported for Focus export configuration"
