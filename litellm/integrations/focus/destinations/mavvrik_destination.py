@@ -136,7 +136,7 @@ class FocusMavvrikDestination(FocusDestination):
         import httpx
 
         async with httpx.AsyncClient() as client:
-            resp = await client.put(signed_url, content=content, timeout=120.0)
+            resp = await client.put(signed_url, content=content, headers={"Content-Type": "text/csv"}, timeout=120.0)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"Mavvrik FOCUS destination: GCS upload failed "
