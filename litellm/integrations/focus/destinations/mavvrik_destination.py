@@ -129,24 +129,27 @@ class FocusMavvrikDestination(FocusDestination):
     async def _upload_to_gcs(self, signed_url: str, content: bytes) -> None:
         """Upload content to GCS via resumable upload signed URL.
 
-        GCS signed URLs from Mavvrik use the resumable upload protocol:
-        1. POST to signed URL with x-goog-resumable: start -> get session URI
-        2. PUT session URI with content
-
-        Uses a bare httpx client to avoid litellm default headers conflicting
-        with the pre-signed header list.
+        Matches the original Mavvrik uploader protocol:
+        1. Gzip-compress the CSV content
+        2. POST signed_url with Content-Type: application/gzip + x-goog-resumable: start
+           -> get session URI from Location header
+        3. PUT session URI with gzip bytes
         """
+        import gzip as _gzip
         import httpx
+
+        gzip_bytes = _gzip.compress(content)
 
         async with httpx.AsyncClient() as client:
             # Step 1: initiate resumable upload session
+            metadata = b'{"contentEncoding":"gzip","contentDisposition":"attachment"}'
             init_resp = await client.post(
                 signed_url,
                 headers={
-                    "Content-Type": "text/csv",
+                    "Content-Type": "application/gzip",
                     "x-goog-resumable": "start",
-                    "Content-Length": "0",
                 },
+                content=metadata,
                 timeout=30.0,
             )
             if init_resp.status_code not in (200, 201):
@@ -162,15 +165,15 @@ class FocusMavvrikDestination(FocusDestination):
                 )
 
             verbose_logger.debug(
-                "Mavvrik FOCUS destination: GCS resumable session started, uploading %d bytes",
-                len(content),
+                "Mavvrik FOCUS destination: GCS session started, uploading %d gzip bytes",
+                len(gzip_bytes),
             )
 
-            # Step 2: upload content to session URI
+            # Step 2: upload gzip content to session URI
             resp = await client.put(
                 session_uri,
-                content=content,
-                headers={"Content-Type": "text/csv"},
+                content=gzip_bytes,
+                headers={"Content-Type": "application/gzip"},
                 timeout=120.0,
             )
 
