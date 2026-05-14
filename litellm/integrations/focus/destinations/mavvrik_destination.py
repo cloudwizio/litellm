@@ -127,17 +127,54 @@ class FocusMavvrikDestination(FocusDestination):
         return signed_url
 
     async def _upload_to_gcs(self, signed_url: str, content: bytes) -> None:
-        """PUT content to GCS signed URL using a bare httpx client.
+        """Upload content to GCS via resumable upload signed URL.
 
-        GCS signed URLs are sensitive to extra headers — the shared litellm
-        httpx client adds user-agent/accept-encoding which are not in the
-        signed headers list and cause MalformedSecurityHeader errors.
+        GCS signed URLs from Mavvrik use the resumable upload protocol:
+        1. POST to signed URL with x-goog-resumable: start -> get session URI
+        2. PUT session URI with content
+
+        Uses a bare httpx client to avoid litellm default headers conflicting
+        with the pre-signed header list.
         """
         import httpx
 
         async with httpx.AsyncClient() as client:
-            resp = await client.put(signed_url, content=content, headers={"Content-Type": "text/csv"}, timeout=120.0)
-        if resp.status_code >= 400:
+            # Step 1: initiate resumable upload session
+            init_resp = await client.post(
+                signed_url,
+                headers={
+                    "Content-Type": "text/csv",
+                    "x-goog-resumable": "start",
+                    "Content-Length": "0",
+                },
+                timeout=30.0,
+            )
+            if init_resp.status_code not in (200, 201):
+                raise RuntimeError(
+                    f"Mavvrik FOCUS destination: GCS session init failed "
+                    f"({init_resp.status_code}): {init_resp.text[:400]}"
+                )
+
+            session_uri = init_resp.headers.get("Location")
+            if not session_uri:
+                raise RuntimeError(
+                    "Mavvrik FOCUS destination: GCS session init missing Location header"
+                )
+
+            verbose_logger.debug(
+                "Mavvrik FOCUS destination: GCS resumable session started, uploading %d bytes",
+                len(content),
+            )
+
+            # Step 2: upload content to session URI
+            resp = await client.put(
+                session_uri,
+                content=content,
+                headers={"Content-Type": "text/csv"},
+                timeout=120.0,
+            )
+
+        if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Mavvrik FOCUS destination: GCS upload failed "
                 f"({resp.status_code}): {resp.text[:400]}"
