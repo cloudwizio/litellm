@@ -12,7 +12,7 @@ anyio==4.8.0 # openai + http req.
 httpx==0.28.1
 openai==2.30.0  # openai req.
 fastapi==0.124.4 # server dep
-starlette==0.49.1 # starlette fastapi dep
+starlette==0.49.3 # starlette fastapi dep
 backoff==2.2.1 # server dep
 pyyaml==6.0.3 # server dep
 uvicorn==0.33.0 # server dep
@@ -73,7 +73,7 @@ jsonschema==4.23.0 # validating json schema - aligned with openapi-core + mcp
 websockets==15.0.1 # for realtime API
 soundfile==0.12.1 # for audio file processing
 openapi-core==0.21.0 # for OpenAPI compliance tests
-pypdf==6.9.2 # for PDF text extraction in RAG ingestion (CVE-2026-27888)
+pypdf==6.12.0 # for PDF text extraction in RAG ingestion (CVE-2026-27888)
 
 # Transitive deps pinned to prevent floating between builds
 aiofiles==24.1.0 # transitive dep (langfuse)
