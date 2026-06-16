@@ -1,7 +1,7 @@
 # LITELLM PROXY DEPENDENCIES #
 # Security: explicit pins for transitive deps (CVE fixes)
 urllib3==2.6.3  # CVE-2025-66471, CVE-2025-66418, CVE-2026-21441
-tornado==6.5.5  # CVE-2025-67725, CVE-2025-67726, CVE-2025-67724, CVE-2026-31958, GHSA-78cv-mqj4-43f7
+tornado==6.5.7  # CVE-2025-67725, CVE-2025-67726, CVE-2025-67724, CVE-2026-31958, GHSA-78cv-mqj4-43f7
 filelock==3.25.2  # CVE-2025-68146
 h11==0.16.0    # CVE-2025-43859, GHSA-vqfr-h8mv-ghfj — HTTP request smuggling
 wheel==0.46.3  # CVE-2026-24049 — path traversal
@@ -12,7 +12,7 @@ anyio==4.8.0 # openai + http req.
 httpx==0.28.1
 openai==2.30.0  # openai req.
 fastapi==0.124.4 # server dep
-starlette==0.49.1 # starlette fastapi dep
+starlette==0.49.3 # starlette fastapi dep
 backoff==2.2.1 # server dep
 pyyaml==6.0.3 # server dep
 uvicorn==0.33.0 # server dep
@@ -73,7 +73,7 @@ jsonschema==4.23.0 # validating json schema - aligned with openapi-core + mcp
 websockets==15.0.1 # for realtime API
 soundfile==0.12.1 # for audio file processing
 openapi-core==0.21.0 # for OpenAPI compliance tests
-pypdf==6.9.2 # for PDF text extraction in RAG ingestion (CVE-2026-27888)
+pypdf==6.13.0 # for PDF text extraction in RAG ingestion (CVE-2026-27888)
 
 # Transitive deps pinned to prevent floating between builds
 aiofiles==24.1.0 # transitive dep (langfuse)
